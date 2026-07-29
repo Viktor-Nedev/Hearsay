@@ -1,0 +1,30 @@
+# secrets — never commit
+.env
+*.env
+!.env.example
+
+# local state
+*.db
+*.sqlite
+*.sqlite3
+hearsay.db
+out/
+recordings/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
