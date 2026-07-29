@@ -1,0 +1,154 @@
+[
+  {
+    "channel": "email",
+    "provider": "ses",
+    "capabilities": [
+      "initiate",
+      "media",
+      "receive",
+      "reply",
+      "send"
+    ],
+    "required_credentials": [],
+    "optional_credentials": [],
+    "setup": null
+  },
+  {
+    "channel": "discord",
+    "provider": "discord",
+    "capabilities": [
+      "group_visibility",
+      "initiate",
+      "interactions",
+      "media",
+      "reactions",
+      "receive",
+      "reply",
+      "see_bots",
+      "send"
+    ],
+    "required_credentials": [],
+    "optional_credentials": [
+      "bot_token",
+      "webhook_url",
+      "username",
+      "avatar_url"
+    ],
+    "setup": null
+  },
+  {
+    "channel": "slack",
+    "provider": "slack",
+    "capabilities": [
+      "interactions",
+      "media",
+      "reactions",
+      "receive",
+      "reply",
+      "send"
+    ],
+    "required_credentials": [],
+    "optional_credentials": [],
+    "setup": null
+  },
+  {
+    "channel": "x",
+    "provider": "x",
+    "capabilities": [
+      "receive",
+      "reply",
+      "send"
+    ],
+    "required_credentials": [
+      "access_token",
+      "user_id"
+    ],
+    "optional_credentials": [
+      "username",
+      "access_secret"
+    ],
+    "setup": null
+  },
+  {
+    "channel": "telegram",
+    "provider": "telegram",
+    "capabilities": [
+      "edit_inbound",
+      "group_visibility",
+      "interactions",
+      "media",
+      "reactions",
+      "receive",
+      "reply",
+      "send"
+    ],
+    "required_credentials": [
+      "bot_token"
+    ],
+    "optional_credentials": [],
+    "setup": null
+  },
+  {
+    "channel": "phone",
+    "provider": "twilio",
+    "capabilities": [
+      "initiate",
+      "otp",
+      "receive",
+      "reply",
+      "send"
+    ],
+    "required_credentials": [
+      "account_sid",
+      "auth_token",
+      "from_number"
+    ],
+    "optional_credentials": [],
+    "setup": null
+  },
+  {
+    "channel": "phone",
+    "provider": "telnyx",
+    "capabilities": [
+      "initiate",
+      "otp",
+      "receive",
+      "reply",
+      "send"
+    ],
+    "required_credentials": [
+      "api_key",
+      "from_number"
+    ],
+    "optional_credentials": [],
+    "setup": null
+  },
+  {
+    "channel": "bluesky",
+    "provider": "bluesky",
+    "capabilities": [
+      "receive",
+      "reply",
+      "send"
+    ],
+    "required_credentials": [
+      "identifier",
+      "app_password"
+    ],
+    "optional_credentials": [],
+    "setup": "### Connect Bluesky (via the Caspian SDK)\nInstall:  pip install caspian-sdk   (or: uv add caspian-sdk)\n\nPoint the SDK at THIS gateway (the base URL is the host serving this endpoint).\nThe channel list/guide are public, but creating a connection is authenticated \u2014\nyou need a project API key (ask the human, or set CASPIAN_API_KEY):\n    from caspian_sdk import CommClient\n    client = CommClient()   # reads CASPIAN_BASE_URL + CASPIAN_API_KEY from env\n\nPer-connection credentials (ask the human for these two):\n- `identifier`   \u2014 the account's Bluesky handle (e.g. `myagent.bsky.social`) or email.\n- `app_password` \u2014 a Bluesky App Password (NOT the account login password).\n\nCreate the app password: log in at https://bsky.app -> Settings -> Privacy and\nSecurity -> App Passwords -> Add App Password -> copy it (`xxxx-xxxx-xxxx-xxxx`).\n\nConnect, then receive & reply:\n    customer = client.create_customer(\"My Co\")\n    agent    = client.create_agent(\"My Agent\")\n    conn = client.connect_bluesky(identifier=\"myagent.bsky.social\",\n                                  app_password=\"xxxx-xxxx-xxxx-xxxx\")\n\n    @client.on_message\n    def handle(message):\n        message.reply(\"...\")   # your answer to message.text\n\n    client.listen()   # polls for inbound (no webhook to configure)\n\nCapabilities: receive, reply, send."
+  },
+  {
+    "channel": "gmeet",
+    "provider": "caspian-gmeet",
+    "capabilities": [
+      "initiate",
+      "receive"
+    ],
+    "required_credentials": [],
+    "optional_credentials": [],
+    "setup": null
+  }
+]
+
+relay-capable channels (8): email, discord, slack, x, telegram, phone, phone, bluesky

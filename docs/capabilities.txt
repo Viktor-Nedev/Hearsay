@@ -1,0 +1,15 @@
+CHANNEL      PROVIDER       recei  reply  send   initi  inter  react  media 
+----------------------------------------------------------------------------
+email        ses              YES    YES    YES    YES     .      .     YES 
+discord      discord          YES    YES    YES    YES    YES    YES    YES 
+slack        slack            YES    YES    YES     .     YES    YES    YES 
+x            x                YES    YES    YES     .      .      .      .  
+telegram     telegram         YES    YES    YES     .     YES    YES    YES 
+phone        twilio           YES    YES    YES    YES     .      .      .  
+phone        telnyx           YES    YES    YES    YES     .      .      .  
+bluesky      bluesky          YES    YES    YES     .      .      .      .  
+gmeet        caspian-gmeet    YES     .      .     YES     .      .      .  
+
+legend: recei=receive reply=reply send=send initi=initiate inter=interactions react=reactions media=media
+
+relay-capable channels (8): email, discord, slack, x, telegram, phone, phone, bluesky
