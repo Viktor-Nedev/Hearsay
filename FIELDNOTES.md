@@ -97,3 +97,87 @@ Installed version is 0.6.1 per pip metadata. Minor, but for a library whose
 behaviour depends on which gateway build it is talking to, being unable to log
 the SDK version from inside the process is a small papercut when something
 misbehaves. Worked around with `importlib.metadata.version("caspian-sdk")`.
+
+---
+
+## Day 2 — 30 July
+
+### 5. The SDK drops `auto_generated`, so a handler cannot spot a bounce
+
+This is the one we would most like fixed, and it came from reading our own data
+rather than from anything going wrong.
+
+The Day 1 gate left two conversations behind, not one. The second was a bounce
+from `MAILER-DAEMON@amazonses.com`, and the gateway had labelled it correctly:
+
+```
+inbound  ch=email  auto=False  from=tester@agents.trycaspianai.com
+outbound ch=email  auto=False  from=hearsay@agents.trycaspianai.com
+inbound  ch=email  auto=True   from=MAILER-DAEMON@amazonses.com
+```
+
+`GET /v1/messages` returns `auto_generated` and `chat_type`. The `Message`
+dataclass handed to `on_message` carries neither:
+
+```python
+>>> [f.name for f in dataclasses.fields(Message)]
+['id', 'conversation_id', 'connection_id', 'customer_id', 'agent_id',
+ 'channel', 'sender', 'subject', 'text', 'html', 'media']
+```
+
+So the gateway knows a message is machine-generated, and then the SDK throws that
+away one layer before anybody can act on it. For a support agent this produces a
+polite reply to a no-reply address. For Hearsay it is worse, because we relay
+statements verbatim to every other player:
+
+> **Ochre says:** "I am currently out of the office and will return Monday."
+
+and a bounce arrives as a paragraph of SES diagnostics attributed to a human who
+never typed it.
+
+The workaround costs a round trip: filter cheaply on sender and opening line, and
+only when a message looks automated re-fetch it by id to check the real flag
+(`hearsay/channels/inbound.py`). Fine for us — one extra call on rare messages —
+but every agent that touches email needs this and most will not know to write it.
+
+**Suggested fix:** add `auto_generated: bool = False` and `chat_type: str | None`
+to the `Message` dataclass and populate them in `_dispatch_message`. Both already
+exist on the wire; this is a two-line change plus a test. Happy to send the PR.
+
+`chat_type` is worth exposing for a second reason — it is how a handler could
+tell a DM from a group without guessing, which is exactly what we spent Day 2
+measuring by hand.
+
+### 6. A conversation record does not say which channel it is on
+
+`list_conversations()` returns `{id, connection_id, subject, created_at}`. No
+channel. The channel lives on each *message* instead, so answering "what channel
+is this conversation on?" means fetching its messages, or keeping your own
+`connection_id -> channel` map from when you connected.
+
+Minor, but it caught us writing the isolation probe: the obvious
+`conversation.get("channel")` silently produced `?` for every row.
+
+### 7. Isolation holds — measured, not assumed
+
+The premise of the game is that no player can read another player's raw words.
+That is not something we enforce; it is a property of how the gateway buckets
+messages. `spike/isolation.py` checks the only thing that matters — whether any
+conversation carries messages from more than one human sender:
+
+```
+  conv_7bdae37f938ee29521cadf3b  [email]  2 msgs  senders=['tester@agents…']
+  conv_b3ba689ea57d6d8cfbaed58e  [email]  1 msgs  senders=['none'] auto=1
+
+ISOLATION HOLDS: every conversation has at most one sender.
+```
+
+Distinct senders get distinct conversations on email, which is what we needed.
+Discord is still unverified — the shared bot installs into a *server*, and
+whether a DM to it opens its own conversation is not documented either way. That
+is the next thing we measure, because if a server channel pools several players
+into one conversation then only one seat per server is safe.
+
+Worth saying: `auto_generated` being right on the wire is what let the probe
+distinguish a bounce from a player at all. The data model is good. It is the
+last hop into the handler that loses it.
