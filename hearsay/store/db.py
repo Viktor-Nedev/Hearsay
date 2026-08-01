@@ -46,15 +46,20 @@ CREATE TABLE IF NOT EXISTS seats (
     UNIQUE (game_id, codename)
 );
 
+-- `kind` separates the two collection phases: a round holds one statement and
+-- one deliberation per seat, and they must not overwrite each other.
 CREATE TABLE IF NOT EXISTS statements (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     game_id    TEXT NOT NULL REFERENCES games(id),
     round      INTEGER NOT NULL,
     seat_id    TEXT NOT NULL REFERENCES seats(conversation_id),
+    kind       TEXT NOT NULL DEFAULT 'statement',
     text       TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    UNIQUE (game_id, round, seat_id)
+    created_at REAL NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS statements_unique
+    ON statements(game_id, round, seat_id, kind);
 
 CREATE TABLE IF NOT EXISTS votes (
     game_id    TEXT NOT NULL REFERENCES games(id),
@@ -234,19 +239,24 @@ class Store:
 
     # ---- round data -------------------------------------------------------
 
-    def record_statement(self, game_id: str, round_no: int, seat_id: str, text: str) -> None:
+    def record_statement(
+        self, game_id: str, round_no: int, seat_id: str, text: str,
+        kind: str = "statement",
+    ) -> None:
         self._db.execute(
-            "INSERT INTO statements (game_id, round, seat_id, text, created_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(game_id, round, seat_id) DO UPDATE SET text = excluded.text",
-            (game_id, round_no, seat_id, text, time.time()),
+            "INSERT INTO statements (game_id, round, seat_id, kind, text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(game_id, round, seat_id, kind) DO UPDATE SET text = excluded.text",
+            (game_id, round_no, seat_id, kind, text, time.time()),
         )
         self._db.commit()
 
-    def statements(self, game_id: str, round_no: int) -> dict[str, str]:
+    def statements(
+        self, game_id: str, round_no: int, kind: str = "statement"
+    ) -> dict[str, str]:
         rows = self._db.execute(
-            "SELECT seat_id, text FROM statements WHERE game_id = ? AND round = ?",
-            (game_id, round_no),
+            "SELECT seat_id, text FROM statements WHERE game_id = ? AND round = ? AND kind = ?",
+            (game_id, round_no, kind),
         )
         return {r["seat_id"]: r["text"] for r in rows}
 
