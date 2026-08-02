@@ -181,3 +181,82 @@ into one conversation then only one seat per server is safe.
 Worth saying: `auto_generated` being right on the wire is what let the probe
 distinguish a bounce from a player at all. The data model is good. It is the
 last hop into the handler that loses it.
+
+---
+
+## Day 5 — 2 August
+
+### 8. `listen()` cannot be made restart-safe
+
+This is the one that changed our architecture rather than just our code.
+
+`listen()` is the idiomatic entry point and it is genuinely nice — resilient
+polling, backoff, per-conversation concurrency strategies, a handler that cannot
+kill the loop by raising. It also takes `from_seq`, which reads like the answer
+to restarts.
+
+The problem is getting a value to pass to it. `listen(from_seq=None)` starts from
+the newest event, so anything that arrived while the process was down is skipped
+in silence. To resume properly you must persist the last `seq` you handled — and
+`seq` never reaches a handler. `Message` carries `id`, `conversation_id`,
+`connection_id`, `customer_id`, `agent_id`, `channel`, `sender`, `subject`,
+`text`, `html`, `media`. No `seq`. The event envelope has it; the object you are
+handed does not.
+
+So the cursor cannot be maintained from inside the public API. For most agents
+this never surfaces: reply to what arrives, miss a message during a deploy,
+nobody notices. Hearsay notices immediately — a game runs for hours across people
+who answer email when they feel like it, and a dropped statement or vote stalls
+the round for everyone else with no way to recover.
+
+We run the documented custom loop instead (`SKILL.md` §15), dispatching through
+`client._dispatch_event()` so the same `@client.on_message` and
+`@client.on_interaction` registrations still do the work, and writing the cursor
+after every event:
+
+```python
+for event in self.client.events(after_seq=cursor, limit=100):
+    self.client._dispatch_event(event)
+    cursor = event["seq"]
+    self.store.set_cursor(cursor)
+```
+
+That means reaching for a private method to keep the public handler contract,
+which is the wrong way round.
+
+**Suggested fix:** either add `seq` to `Message` (it is already in the envelope
+`_dispatch_event` unpacks), or give `listen()` an `on_cursor=` callback invoked
+with each `seq` after dispatch. Either turns a restart-safe agent into a
+three-line change instead of a fork of the loop.
+
+### 9. Our own bug, recorded because it will bite others
+
+Not the SDK's fault, but anyone building a multi-player agent on Caspian will hit
+it. `concurrency="queue"` serialises messages *within a conversation*, which is
+the right default and reads like enough. It is not, once one piece of state spans
+several conversations: three players answering the same round are three threads
+in one game. Our SQLite connection used `check_same_thread=False`, which only
+silences the ownership check — it does not make the connection safe — and
+concurrent access raised `InterfaceError: bad parameter or other API misuse`.
+
+Caught by a test that puts three players on a `threading.Barrier` and releases
+them together, which is exactly what happens when a round closes and everyone
+replies at once. Fixed with a lock around the store and a per-game lock around
+load → apply → save.
+
+### 10. What went right
+
+A real inbound email reached the handler, took a seat, and got a real reply back,
+first try:
+
+```
+18:17:52  <- unseated [email] join: 'JOIN VFM6\r\n'
+18:17:52  Ochre joined VFM6 from email
+seq=3268   message.received   inbound   'JOIN VFM6\r\n'
+seq=3269   message.sent       outbound  "You're in. You are Ochre. …"
+```
+
+`connect_email()` being idempotent means the agent can be restarted freely
+without accumulating connections, and `test_email()` meant we could exercise the
+whole inbound path without another human. Both are small things that made a
+one-person project move faster than it had any right to.
