@@ -17,10 +17,35 @@ seats cannot share a thread.
 
 from __future__ import annotations
 
+import functools
 import sqlite3
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
+
+_T = TypeVar("_T")
+
+
+def _locked(method: Callable[..., _T]) -> Callable[..., _T]:
+    """Serialise access to the connection.
+
+    `check_same_thread=False` only silences sqlite3's ownership check — it does
+    not make a connection safe to use from two threads at once, which raises
+    `InterfaceError: bad parameter or other API misuse` under load. A game spans
+    every player's conversation, so two people answering simultaneously are two
+    threads in here. Every public method takes the lock.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: "Store", *args, **kwargs) -> _T:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -113,9 +138,10 @@ class Seat:
 class Store:
     def __init__(self, path: str | Path = "hearsay.db") -> None:
         self.path = str(path)
-        # check_same_thread=False: the phase scheduler ticks on a background
-        # thread while listen() dispatches on another. All writes go through
-        # this one connection, which sqlite serialises internally.
+        # Reentrant so a decorated method may call another one.
+        self._lock = threading.RLock()
+        # check_same_thread=False lets the dispatch threads share one connection;
+        # `_locked` is what actually makes that safe.
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -123,15 +149,18 @@ class Store:
         self._db.executescript(SCHEMA)
         self._db.commit()
 
+    @_locked
     def close(self) -> None:
         self._db.close()
 
     # ---- cursor -----------------------------------------------------------
 
+    @_locked
     def get_cursor(self, key: str = "events") -> int:
         row = self._db.execute("SELECT seq FROM cursor WHERE k = ?", (key,)).fetchone()
         return int(row["seq"]) if row else 0
 
+    @_locked
     def set_cursor(self, seq: int, key: str = "events") -> None:
         self._db.execute(
             "INSERT INTO cursor (k, seq) VALUES (?, ?) "
@@ -142,6 +171,7 @@ class Store:
 
     # ---- games ------------------------------------------------------------
 
+    @_locked
     def create_game(self, game_id: str, code: str, honest: bool = False) -> None:
         self._db.execute(
             "INSERT INTO games (id, code, phase, round, honest, created_at) "
@@ -150,14 +180,17 @@ class Store:
         )
         self._db.commit()
 
+    @_locked
     def game_by_code(self, code: str) -> sqlite3.Row | None:
         return self._db.execute(
             "SELECT * FROM games WHERE code = ? AND ended_at IS NULL", (code.upper(),)
         ).fetchone()
 
+    @_locked
     def game(self, game_id: str) -> sqlite3.Row | None:
         return self._db.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
 
+    @_locked
     def set_phase(self, game_id: str, phase: str, round_no: int | None = None) -> None:
         if round_no is None:
             self._db.execute("UPDATE games SET phase = ? WHERE id = ?", (phase, game_id))
@@ -167,12 +200,14 @@ class Store:
             )
         self._db.commit()
 
+    @_locked
     def end_game(self, game_id: str) -> None:
         self._db.execute("UPDATE games SET ended_at = ? WHERE id = ?", (time.time(), game_id))
         self._db.commit()
 
     # ---- seats ------------------------------------------------------------
 
+    @_locked
     def add_seat(
         self,
         conversation_id: str,
@@ -193,12 +228,14 @@ class Store:
         assert seat is not None
         return seat
 
+    @_locked
     def seat(self, conversation_id: str) -> Seat | None:
         row = self._db.execute(
             "SELECT * FROM seats WHERE conversation_id = ?", (conversation_id,)
         ).fetchone()
         return _row_to_seat(row) if row else None
 
+    @_locked
     def seats(self, game_id: str, alive_only: bool = False) -> list[Seat]:
         sql = "SELECT * FROM seats WHERE game_id = ?"
         if alive_only:
@@ -206,6 +243,7 @@ class Store:
         sql += " ORDER BY joined_at"
         return [_row_to_seat(r) for r in self._db.execute(sql, (game_id,))]
 
+    @_locked
     def seat_by_codename(self, game_id: str, codename: str) -> Seat | None:
         row = self._db.execute(
             "SELECT * FROM seats WHERE game_id = ? AND codename = ? COLLATE NOCASE",
@@ -213,6 +251,7 @@ class Store:
         ).fetchone()
         return _row_to_seat(row) if row else None
 
+    @_locked
     def touch_seat(self, conversation_id: str, last_message_id: str) -> None:
         """Remember the newest inbound message so outbox can reply-fallback to it."""
         self._db.execute(
@@ -221,24 +260,28 @@ class Store:
         )
         self._db.commit()
 
+    @_locked
     def assign_role(self, conversation_id: str, role: str) -> None:
         self._db.execute(
             "UPDATE seats SET role = ? WHERE conversation_id = ?", (role, conversation_id)
         )
         self._db.commit()
 
+    @_locked
     def eliminate(self, conversation_id: str) -> None:
         self._db.execute(
             "UPDATE seats SET alive = 0 WHERE conversation_id = ?", (conversation_id,)
         )
         self._db.commit()
 
+    @_locked
     def remove_seat(self, conversation_id: str) -> None:
         self._db.execute("DELETE FROM seats WHERE conversation_id = ?", (conversation_id,))
         self._db.commit()
 
     # ---- round data -------------------------------------------------------
 
+    @_locked
     def record_statement(
         self, game_id: str, round_no: int, seat_id: str, text: str,
         kind: str = "statement",
@@ -251,6 +294,7 @@ class Store:
         )
         self._db.commit()
 
+    @_locked
     def statements(
         self, game_id: str, round_no: int, kind: str = "statement"
     ) -> dict[str, str]:
@@ -260,6 +304,7 @@ class Store:
         )
         return {r["seat_id"]: r["text"] for r in rows}
 
+    @_locked
     def record_vote(self, game_id: str, round_no: int, voter_seat: str, target: str) -> None:
         self._db.execute(
             "INSERT INTO votes (game_id, round, voter_seat, target, created_at) "
@@ -269,6 +314,7 @@ class Store:
         )
         self._db.commit()
 
+    @_locked
     def votes(self, game_id: str, round_no: int) -> dict[str, str]:
         rows = self._db.execute(
             "SELECT voter_seat, target FROM votes WHERE game_id = ? AND round = ?",
@@ -278,6 +324,7 @@ class Store:
 
     # ---- ledger -----------------------------------------------------------
 
+    @_locked
     def record_relay(
         self, game_id: str, round_no: int, seat_id: str, original: str, relayed: str, cause: str
     ) -> None:
@@ -289,6 +336,7 @@ class Store:
         )
         self._db.commit()
 
+    @_locked
     def ledger(self, game_id: str) -> list[sqlite3.Row]:
         return list(
             self._db.execute(
