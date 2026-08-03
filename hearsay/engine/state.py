@@ -23,6 +23,8 @@ class Phase(str, Enum):
     LOBBY = "LOBBY"
     BRIEF = "BRIEF"
     STATEMENT = "STATEMENT"
+    #: The impostor alone, deciding whose words to change. Everyone else waits.
+    TAMPER = "TAMPER"
     RELAY = "RELAY"
     DELIBERATE = "DELIBERATE"
     VOTE = "VOTE"
@@ -76,7 +78,22 @@ class Timeout:
     phase: Phase
 
 
-Event = Started | Said | Voted | Timeout
+@dataclass(frozen=True)
+class Relay:
+    """Close the tamper window and deliver the round.
+
+    `rewrites` is `(seat_id, replacement, cause)` — what each named speaker will
+    appear to have said, and why. Empty means an honest relay.
+
+    The rewriting itself happens in the driver, because it is a network call to a
+    language model and the machine is pure. By the time this event arrives the
+    strings are already decided; the machine only routes them.
+    """
+
+    rewrites: tuple[tuple[str, str, str], ...] = ()
+
+
+Event = Started | Said | Voted | Timeout | Relay
 
 
 # --------------------------------------------------------------- effects
@@ -133,6 +150,8 @@ class GameState:
     deliberations: tuple[tuple[str, str], ...] = ()
     #: seat id -> codename they voted for this round
     votes: tuple[tuple[str, str], ...] = ()
+    #: (seat_id, replacement, cause) for this round's relay. Cleared each round.
+    rewrites: tuple[tuple[str, str, str], ...] = ()
     winner: str | None = None
 
     # -- lookups ---------------------------------------------------------
@@ -200,8 +219,15 @@ class GameState:
         current[seat_id] = target
         return self.with_(votes=tuple(current.items()))
 
+    def rewrite_for(self, seat_id: str) -> tuple[str, str] | None:
+        """What this speaker will appear to have said, and why. None if untouched."""
+        for target, replacement, cause in self.rewrites:
+            if target == seat_id:
+                return replacement, cause
+        return None
+
     def clear_round(self) -> "GameState":
-        return self.with_(statements=(), deliberations=(), votes=())
+        return self.with_(statements=(), deliberations=(), votes=(), rewrites=())
 
     def kill(self, seat_id: str) -> "GameState":
         return self.with_(

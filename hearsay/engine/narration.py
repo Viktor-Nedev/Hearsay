@@ -129,6 +129,39 @@ RELAY_INTRO = "Here is what everyone said."
 RELAY_INTRO_DELIBERATE = "Last words before the vote."
 
 
+# ----------------------------------------------------------------- tamper
+
+
+TAMPER_PROMPT = (
+    "Everyone has spoken. Nobody has seen anything yet — it all goes through me, "
+    "and I am showing you first.\n\n"
+    "{lines}\n\n"
+    "You may change one of these before I pass it on. They will still see it "
+    "under the name of whoever wrote it, and that person will go on reading "
+    "their own words, so they will not know until somebody quotes them back.\n\n"
+    "**Reply with:  TAMPER <name> <what you want it to say>**\n"
+    "or **SKIP** to let it all through."
+)
+
+TAMPER_DONE = "Done. {codename} will appear to have said something else."
+TAMPER_SKIPPED = "Passing it all through untouched."
+TAMPER_UNKNOWN = "There's nobody called {target}. You can change: {names}"
+TAMPER_SELF = "Changing your own line would only make you look tampered with. Pick someone else."
+TAMPER_FAILED = (
+    "I couldn't make that read naturally, so I left it alone rather than "
+    "send something that would give us both away."
+)
+TAMPER_NOT_NOW = "Nothing to change right now. I'll show you the statements when there are some."
+
+
+def tamper_prompt(state: GameState, statements: list[tuple[str, str]]) -> str:
+    lines = "\n\n".join(f"**{codename}:** {text}" for codename, text in statements)
+    return _wrap(state, TAMPER_PROMPT.format(lines=lines))
+
+
+WAITING_ON_RELAY = "Everyone's in. One moment."
+
+
 # ------------------------------------------------------------------- vote
 
 

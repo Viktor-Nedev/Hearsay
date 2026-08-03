@@ -7,6 +7,7 @@ from hearsay.engine.state import (
     GameState,
     LogRelay,
     Phase,
+    Relay,
     Said,
     SeatView,
     SetDeadline,
@@ -345,6 +346,107 @@ class TestLeakInvariants:
         relayed = [m for m in to(collected, "c1") if secret in m]
         assert len(relayed) == 1
         assert "Here is what everyone said" in relayed[0]
+
+
+class TestTampering:
+    """The twist: one round, told differently to different people."""
+
+    def _to_statements(self, n=4):
+        state, _ = apply(make_state(n, honest=False), Started(), random.Random(0))
+        for i in range(n):
+            state, effects = apply(state, Said(f"c{i}", f"seat {i} original line"))
+        return state, effects
+
+    def test_statements_stop_at_the_tamper_phase(self):
+        state, _ = self._to_statements()
+        assert state.phase is Phase.TAMPER
+
+    def test_only_the_impostor_is_offered_the_choice(self):
+        state, effects = self._to_statements()
+        offered = [s.id for s in state.seats
+                   if any("TAMPER" in m for m in to(effects, s.id))]
+        assert offered == [state.impostor.id]
+
+    def test_nothing_is_relayed_before_the_impostor_decides(self):
+        _, effects = self._to_statements()
+        assert "Here is what everyone said" not in all_text(effects)
+
+    def test_the_author_reads_their_own_words(self):
+        """The invariant the whole twist rests on."""
+        state, _ = self._to_statements()
+        state, effects = apply(state, Relay((("c0", "i saw Slate slip out", "impostor"),)))
+
+        own = next(m for m in to(effects, "c0") if "Here is what everyone said" in m)
+        assert "seat 0 original line" in own
+        assert "i saw Slate slip out" not in own
+
+    def test_everyone_else_reads_the_rewrite(self):
+        state, _ = self._to_statements()
+        state, effects = apply(state, Relay((("c0", "i saw Slate slip out", "impostor"),)))
+
+        for seat_id in ("c1", "c2", "c3"):
+            theirs = next(m for m in to(effects, seat_id) if "Here is what everyone said" in m)
+            assert "i saw Slate slip out" in theirs
+            assert "seat 0 original line" not in theirs
+
+    def test_untouched_speakers_are_identical_for_everyone(self):
+        state, _ = self._to_statements()
+        state, effects = apply(state, Relay((("c0", "changed", "impostor"),)))
+        for seat_id in ("c0", "c1", "c2", "c3"):
+            theirs = next(m for m in to(effects, seat_id) if "Here is what everyone said" in m)
+            assert "seat 2 original line" in theirs
+
+    def test_ledger_records_one_row_per_speaker(self):
+        state, _ = self._to_statements()
+        _, effects = apply(state, Relay((("c0", "changed", "impostor"),)))
+        rows = [e for e in effects if isinstance(e, LogRelay)]
+        assert len(rows) == 4
+        tampered = [r for r in rows if r.cause == "impostor"]
+        assert len(tampered) == 1
+        assert tampered[0].original == "seat 0 original line"
+        assert tampered[0].relayed == "changed"
+
+    def test_noise_is_logged_separately(self):
+        state, _ = self._to_statements()
+        _, effects = apply(state, Relay((("c1", "drifted", "noise"),)))
+        causes = {e.cause for e in effects if isinstance(e, LogRelay)}
+        assert causes == {"clean", "noise"}
+
+    def test_skipping_relays_everything_untouched(self):
+        state, _ = self._to_statements()
+        state, effects = apply(state, Relay(()))
+        assert state.phase is Phase.DELIBERATE
+        assert all(e.cause == "clean" for e in effects if isinstance(e, LogRelay))
+
+    def test_a_silent_impostor_does_not_stall_the_game(self):
+        state, _ = self._to_statements()
+        state, effects = apply(state, Timeout(Phase.TAMPER))
+        assert state.phase is Phase.DELIBERATE
+        assert "Here is what everyone said" in all_text(effects)
+
+    def test_rewrites_do_not_leak_into_the_deliberation_relay(self):
+        state, _ = self._to_statements()
+        state, _ = apply(state, Relay((("c0", "changed", "impostor"),)))
+        assert state.rewrites == ()
+
+        for i in range(4):
+            state, effects = apply(state, Said(f"c{i}", f"seat {i} second line"))
+        theirs = next(m for m in to(effects, "c1") if "Last words before the vote" in m)
+        assert "changed" not in theirs
+        assert "seat 0 second line" in theirs
+
+    def test_honest_mode_never_opens_the_tamper_phase(self):
+        state, _ = apply(make_state(4, honest=True), Started(), random.Random(0))
+        for i in range(4):
+            state, effects = apply(state, Said(f"c{i}", f"line {i}"))
+        assert state.phase is Phase.DELIBERATE
+        assert "TAMPER" not in all_text(effects)
+
+    def test_relay_event_outside_the_tamper_phase_is_ignored(self):
+        state, _ = apply(make_state(4, honest=False), Started(), random.Random(0))
+        after, effects = apply(state, Relay((("c0", "changed", "impostor"),)))
+        assert after is state
+        assert effects == []
 
 
 class TestTimeout:

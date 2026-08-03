@@ -26,12 +26,18 @@ from hearsay.engine.state import (
     GameState,
     LogRelay,
     Phase,
+    Relay,
     Said,
     Started,
     Voted,
 )
 from hearsay.store.db import Store
 from hearsay.store.snapshot import load_state, save_state
+from hearsay.tamper import build_rewriter
+
+#: How often the agent distorts a line nobody asked it to. Without this every
+#: rewrite is provably the impostor's, and the game collapses to one accusation.
+NOISE_RATE = 0.25
 
 CHANNELS = ["discord", "email", "slack", "discord", "email", "slack"]
 
@@ -82,9 +88,9 @@ def _suspicion(state: GameState, seat_id: str) -> list[str]:
     return [name for name, _ in sorted(counts.items(), key=lambda kv: -kv[1])]
 
 
-def _seed_game(store: Store, seats: int, rng: random.Random) -> str:
+def _seed_game(store: Store, seats: int, rng: random.Random, honest: bool = False) -> str:
     game_id = f"sim_{uuid.uuid4().hex[:8]}"
-    store.create_game(game_id, rules.new_game_code(), honest=True)
+    store.create_game(game_id, rules.new_game_code(), honest=honest)
     for i in range(seats):
         store.add_seat(
             conversation_id=f"conv_{i}",
@@ -97,7 +103,37 @@ def _seed_game(store: Store, seats: int, rng: random.Random) -> str:
     return game_id
 
 
-def _drive(state: GameState, rng: random.Random) -> tuple[GameState, list, list]:
+def _plan_tamper(state: GameState, rewriter, rng: random.Random) -> tuple[tuple, ...]:
+    """What the impostor changes, plus whatever the agent garbles on its own."""
+    statements = dict(state.statements)
+    impostor = next((s for s in state.alive if s.role == rules.IMPOSTOR), None)
+    candidates = [s for s in state.alive if s.id in statements and s is not impostor]
+    if not candidates:
+        return ()
+
+    rewrites: list[tuple[str, str, str]] = []
+
+    victim = rng.choice(candidates)
+    others = [s.codename for s in state.alive if s.id not in (victim.id, impostor.id)]
+    if others:
+        instruction = f"make it look like {victim.codename} saw {rng.choice(others)} sneaking off"
+        changed = rewriter.rewrite(statements[victim.id], victim.codename, instruction)
+        if changed != statements[victim.id]:
+            rewrites.append((victim.id, changed, "impostor"))
+
+    # Ambient noise, on somebody the impostor did not touch.
+    untouched = [s for s in candidates if s.id != victim.id]
+    if untouched and rng.random() < NOISE_RATE:
+        drifted_seat = rng.choice(untouched)
+        drifted = rewriter.rewrite(statements[drifted_seat.id], drifted_seat.codename,
+                                   "", subtle=True)
+        if drifted != statements[drifted_seat.id]:
+            rewrites.append((drifted_seat.id, drifted, "noise"))
+
+    return tuple(rewrites)
+
+
+def _drive(state: GameState, rng: random.Random, rewriter=None) -> tuple[GameState, list, list]:
     """Answer whatever the current phase is asking for, from every living seat.
 
     Returns the new state, the effects, and a transcript of what the bots did —
@@ -115,6 +151,13 @@ def _drive(state: GameState, rng: random.Random) -> tuple[GameState, list, list]
             cast.append((seat.codename, text))
             state, new = apply(state, Said(seat.id, text))
             effects += new
+
+    elif state.phase is Phase.TAMPER:
+        rewrites = _plan_tamper(state, rewriter, rng) if rewriter else ()
+        for seat_id, text, cause in rewrites:
+            cast.append((state.seat(seat_id).codename, f"[{cause}] {text}"))
+        state, new = apply(state, Relay(rewrites))
+        effects += new
 
     elif state.phase is Phase.VOTE:
         for seat in state.alive:
@@ -137,6 +180,22 @@ def _render(state: GameState, before: GameState, effects: list, cast: list) -> N
         print(f"  {label}")
         for codename, text in cast:
             print(f"    {codename:<11}{text}")
+
+        # Only after the relay actually happened. With tampering on, statements
+        # are held back until the impostor has had their turn.
+        relays = [e for e in effects if isinstance(e, LogRelay)]
+        if relays:
+            altered = [r for r in relays if r.cause != "clean"]
+            note = f"  \033[35m({len(altered)} altered)\033[0m" if altered else ""
+            print(f"    \033[2m→ relayed to {len(state.alive)} seats{note}\033[0m")
+
+    if before.phase is Phase.TAMPER:
+        if cast:
+            print("  \033[35mtampering\033[0m")
+            for codename, text in cast:
+                print(f"    {codename:<11}{text}")
+        else:
+            print("  \033[2mtampering   (nothing changed)\033[0m")
 
         relays = [e for e in effects if isinstance(e, LogRelay)]
         altered = [r for r in relays if r.cause != "clean"]
@@ -163,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=None, help="fix for a repeatable game")
     parser.add_argument("--watch", help="print every message one codename receives")
     parser.add_argument("--max-rounds", type=int, default=12)
+    parser.add_argument("--honest", action="store_true",
+                        help="no tampering; the relay passes everything through")
+    parser.add_argument("--live-llm", action="store_true",
+                        help="use Gemini for rewrites instead of the offline backend")
     args = parser.parse_args(argv)
 
     if not rules.MIN_SEATS <= args.seats <= rules.MAX_SEATS:
@@ -171,7 +234,12 @@ def main(argv: list[str] | None = None) -> int:
 
     rng = random.Random(args.seed)
     store = Store(":memory:")
-    game_id = _seed_game(store, args.seats, rng)
+    game_id = _seed_game(store, args.seats, rng, honest=args.honest)
+
+    from spike.probe import _load_dotenv
+
+    _load_dotenv()
+    rewriter = None if args.honest else build_rewriter(prefer_offline=not args.live_llm)
 
     state = load_state(store, game_id)
     state, effects = apply(state, Started(), rng)
@@ -183,13 +251,14 @@ def main(argv: list[str] | None = None) -> int:
         watched += [e.payload.text for e in effects
                     if isinstance(e, Deliver) and e.seat_id == watch_seat.id]
 
-    print(f"\n\033[1mHEARSAY\033[0m  {args.seats} seats  ·  honest mode  ·  seed {args.seed}")
+    mode = "honest" if args.honest else f"tampering via {getattr(rewriter, 'name', '?')}"
+    print(f"\n\033[1mHEARSAY\033[0m  {args.seats} seats  ·  {mode}  ·  seed {args.seed}")
     print("  " + "  ".join(f"{s.codename}/{s.channel}" for s in state.seats))
 
     rounds = 0
     while state.phase is not Phase.GAMEOVER and rounds < args.max_rounds:
         before = state
-        state, effects, cast = _drive(state, rng)
+        state, effects, cast = _drive(state, rng, rewriter)
 
         # Round-trip through SQLite every step, so a persistence bug shows up
         # here rather than in front of four humans.

@@ -27,6 +27,7 @@ from hearsay.engine.state import (
     GameState,
     LogRelay,
     Phase,
+    Relay,
     Said,
     SeatView,
     SetDeadline,
@@ -37,8 +38,10 @@ from hearsay.engine.state import (
 from hearsay.transport import Payload
 
 #: How long a phase waits for stragglers before moving on without them.
+#: TAMPER is short: everyone else is sitting in silence while it runs.
 PHASE_SECONDS = {
     Phase.STATEMENT: 300,
+    Phase.TAMPER: 120,
     Phase.DELIBERATE: 240,
     Phase.VOTE: 180,
 }
@@ -53,6 +56,8 @@ def apply(
         return _said(state, event)
     if isinstance(event, Voted):
         return _voted(state, event)
+    if isinstance(event, Relay):
+        return _relayed(state, event)
     if isinstance(event, Timeout):
         return _timeout(state, event)
     return state, []
@@ -130,47 +135,107 @@ def _said(state: GameState, event: Said) -> tuple[GameState, list[Effect]]:
     if not updated.everyone_answered():
         return updated, effects
 
-    return _relay(updated, effects)
+    if updated.phase is Phase.STATEMENT and _can_tamper(updated):
+        return _open_tamper(updated, effects)
+
+    return _relay(updated, effects, updated.phase)
 
 
-def _relay(state: GameState, effects: list[Effect]) -> tuple[GameState, list[Effect]]:
-    """Deliver the round's words to everyone, then open the next phase."""
-    was = state.phase
+# ----------------------------------------------------------------- tamper
+
+
+def _can_tamper(state: GameState) -> bool:
+    """Only when there is a living impostor and the game is not in honest mode."""
+    return not state.honest and any(s.role == IMPOSTOR for s in state.alive)
+
+
+def _open_tamper(state: GameState, effects: list[Effect]) -> tuple[GameState, list[Effect]]:
+    """Show the impostor everything, before anyone else sees any of it.
+
+    Seeing the round first is the whole of the power. Everyone else has already
+    been told their statement landed, so their silence here reads as waiting
+    rather than as something happening.
+    """
+    tampering = state.with_(phase=Phase.TAMPER)
+    impostor = next(s for s in tampering.alive if s.role == IMPOSTOR)
+
+    lines = [
+        (seat.codename, text)
+        for seat in tampering.alive
+        if (text := dict(tampering.statements).get(seat.id)) is not None
+    ]
+    effects.append(
+        Deliver(impostor.id, Payload(narration.tamper_prompt(tampering, lines)))
+    )
+    effects.append(SetDeadline(PHASE_SECONDS[Phase.TAMPER], Phase.TAMPER))
+    return tampering, effects
+
+
+def _relayed(state: GameState, event: Relay) -> tuple[GameState, list[Effect]]:
+    """The tamper window closed. Whatever was decided, deliver the round."""
+    if state.phase is not Phase.TAMPER:
+        return state, []
+    return _relay(state.with_(rewrites=event.rewrites), [], Phase.STATEMENT)
+
+
+# ------------------------------------------------------------------ relay
+
+
+def _relay(
+    state: GameState, effects: list[Effect], source: Phase
+) -> tuple[GameState, list[Effect]]:
+    """Deliver the round's words — a different transcript per recipient."""
     relaying = state.with_(phase=Phase.RELAY)
+    collected = (
+        dict(state.statements) if source is Phase.STATEMENT else dict(state.deliberations)
+    )
 
-    lines, log = _relay_lines(relaying, state.collected())
-    effects.extend(log)
+    # One ledger row per speaker, not per recipient: a rewrite is decided once.
+    for seat in relaying.alive:
+        original = collected.get(seat.id)
+        if original is None:
+            continue
+        rewrite = relaying.rewrite_for(seat.id)
+        relayed, cause = rewrite if rewrite else (original, "clean")
+        effects.append(LogRelay(seat.id, original, relayed, cause))
 
     intro = (
-        narration.RELAY_INTRO if was is Phase.STATEMENT else narration.RELAY_INTRO_DELIBERATE
+        narration.RELAY_INTRO if source is Phase.STATEMENT
+        else narration.RELAY_INTRO_DELIBERATE
     )
-    transcript = narration.transcript(relaying, lines, intro)
-    for seat in relaying.alive:
-        effects.append(Deliver(seat.id, Payload(transcript)))
+    for recipient in relaying.alive:
+        lines = _relay_for(relaying, recipient, collected)
+        effects.append(
+            Deliver(recipient.id, Payload(narration.transcript(relaying, lines, intro)))
+        )
 
-    nxt = Phase.DELIBERATE if was is Phase.STATEMENT else Phase.VOTE
-    return _open_collection(relaying.with_(phase=nxt), effects)
+    nxt = Phase.DELIBERATE if source is Phase.STATEMENT else Phase.VOTE
+    # Rewrites are spent: they belong to the statements just delivered, and must
+    # not bleed into the deliberation relay later this round.
+    return _open_collection(relaying.with_(phase=nxt, rewrites=()), effects)
 
 
-def _relay_lines(
-    state: GameState, collected: dict[str, str]
-) -> tuple[list[tuple[str, str]], list[LogRelay]]:
-    """Turn what was said into what everyone receives.
+def _relay_for(
+    state: GameState, recipient: SeatView, collected: dict[str, str]
+) -> list[tuple[str, str]]:
+    """What one person receives.
 
-    **This is the seam.** In honest mode it is the identity function and every
-    ledger row reads 'clean'. When the impostor gains their power, the rewrite
-    happens here and nowhere else — the phases above do not change at all.
+    **This is the seam.** The speaker always reads back exactly what they typed;
+    everyone else reads whatever the impostor decided they said. That asymmetry
+    is the game: the victim finds out only when the room quotes something at them
+    they never wrote, and by then the only witness is the thing that changed it.
     """
     lines: list[tuple[str, str]] = []
-    log: list[LogRelay] = []
     for seat in state.alive:
         original = collected.get(seat.id)
         if original is None:
             continue
-        relayed = original
-        lines.append((seat.codename, relayed))
-        log.append(LogRelay(seat.id, original, relayed, cause="clean"))
-    return lines, log
+        if seat.id == recipient.id:
+            lines.append((seat.codename, original))
+            continue
+        rewrite = state.rewrite_for(seat.id)
+        lines.append((seat.codename, rewrite[0] if rewrite else original))
+    return lines
 
 
 # ------------------------------------------------------------------ votes
@@ -251,7 +316,15 @@ def _timeout(state: GameState, event: Timeout) -> tuple[GameState, list[Effect]]
     Guarded on phase: a timer set for round 2's vote must not fire into round 3
     and skip a whole statement round.
     """
-    if state.phase is not event.phase or not state.phase.collects_input:
+    if state.phase is not event.phase:
+        return state, []
+
+    if state.phase is Phase.TAMPER:
+        # The impostor sat on it. Everyone else is waiting in silence, so the
+        # round goes through untouched rather than hanging on one player.
+        return _relay(state, [], Phase.STATEMENT)
+
+    if not state.phase.collects_input:
         return state, []
 
     if state.phase is Phase.VOTE:
@@ -263,7 +336,10 @@ def _timeout(state: GameState, event: Timeout) -> tuple[GameState, list[Effect]]
         # and open the next phase rather than stalling here forever.
         return _skip_empty(state)
 
-    return _relay(state, [])
+    if state.phase is Phase.STATEMENT and _can_tamper(state):
+        return _open_tamper(state, [])
+
+    return _relay(state, [], state.phase)
 
 
 def _skip_empty(state: GameState) -> tuple[GameState, list[Effect]]:
