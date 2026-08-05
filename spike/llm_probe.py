@@ -73,14 +73,14 @@ def list_models(key: str) -> list[str]:
     ]
 
 
-def try_model(model: str, key: str) -> tuple[str, str]:
+def try_model(model: str, key: str, timeout: int = 120) -> tuple[str, str]:
     """Actually call it. Returns (status, detail)."""
     payload = {
         "contents": [{"parts": [{"text": "Reply with the single word: ready"}]}],
         "generationConfig": {"maxOutputTokens": 512, "temperature": 0},
     }
     try:
-        data = _request(f"models/{model}:generateContent", key, payload)
+        data = _request(f"models/{model}:generateContent", key, payload, timeout=timeout)
     except urllib.error.HTTPError as exc:
         try:
             error = json.load(exc).get("error", {})
@@ -89,6 +89,13 @@ def try_model(model: str, key: str) -> tuple[str, str]:
         return f"{exc.code} {error.get('status', '')}".strip(), error.get("message", "")[:70]
     except urllib.error.URLError as exc:
         return "unreachable", str(exc.reason)[:70]
+    except TimeoutError:
+        # A thinking model can spend minutes before its first byte. Reporting
+        # this as a distinct outcome matters: a slow model is not a broken one,
+        # and an uncaught read timeout used to crash the whole probe.
+        return "timeout", f"no response within {timeout}s"
+    except OSError as exc:
+        return "error", f"{type(exc).__name__}: {exc}"
 
     candidate = (data.get("candidates") or [{}])[0]
     parts = candidate.get("content", {}).get("parts") or []
