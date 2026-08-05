@@ -260,3 +260,63 @@ seq=3269   message.sent       outbound  "You're in. You are Ochre. …"
 without accumulating connections, and `test_email()` meant we could exercise the
 whole inbound path without another human. Both are small things that made a
 one-person project move faster than it had any right to.
+
+---
+
+## Day 8 — 5 August
+
+### 11. `test_email()` starts a new conversation every time
+
+It is the best affordance in the SDK for solo development and we leaned on it
+hard, so its one limit is worth writing down: **each call opens a fresh
+conversation**, even with the same sender and the same subject.
+
+```
+conv_b44dc671593e6b33e  subj=hearsay  inbound=['JOIN YK8M']
+conv_464555f2caddacdd2  subj=hearsay  inbound=['START']
+```
+
+Two calls, same subject, same sender, two conversations. Since a seat in Hearsay
+*is* a conversation, the second message arrived as a stranger:
+
+```
+17:09:03  Indigo joined YK8M from email
+17:09:31  <- unseated [email] start: 'START'
+```
+
+Nothing is broken — a real person replying in their mail client stays in one
+thread, which is the case that matters. But it means `test_email()` can only
+ever simulate first contact, not a conversation, so a multi-turn game cannot be
+driven without either a real inbox or a second channel. Worth a line in the docs
+next to the existing "check your Junk folder" note.
+
+### 12. `test_email()` picks the wrong connection once a second channel exists
+
+With only email connected, `client.test_email(text=...)` works. The moment
+Discord was connected too, the same call started failing:
+
+```
+CommError: 422: Channel 'discord' does not support test emails
+```
+
+The parameter to fix it already exists — `test_email(..., connection_id=...)` —
+but nothing about the failure points at it, and the error names the channel it
+wrongly chose rather than saying a choice was made. A single-channel project
+will never see this; a multi-channel one hits it the day it adds the second
+channel, which is exactly when it is hardest to attribute.
+
+**Suggested fix:** default `test_email()` to the email connection when one
+exists, or say so in the error — *"multiple connections; pass connection_id"*.
+
+### 13. What went right
+
+Bots share one code path with people. An AI seat is an ordinary row with a
+synthetic conversation id and `channel="ai"`, and the *only* place in the system
+that knows bots exist is one branch in `channels/outbox.py` that drops the
+payload instead of sending it. The engine, the store, the router and the lobby
+are all unchanged.
+
+That fell out of keying seats on `conversation_id` back on day 2 rather than on
+`message.sender`. A decision made to dodge the fact that `sender` has a
+different shape on every channel turned out to be the thing that let a computer
+sit in a chair.
