@@ -320,3 +320,73 @@ That fell out of keying seats on `conversation_id` back on day 2 rather than on
 `message.sender`. A decision made to dodge the fact that `sender` has a
 different shape on every channel turned out to be the thing that let a computer
 sit in a chair.
+
+---
+
+## Day 9 — 6 August
+
+Two channels are now proven in both directions. Discord inbound arrived —
+
+```
+conv_f97b13e2…  [discord]  1 msgs  senders=['viktornedev']  chat_type=['guild']
+```
+
+— and a proactive `send_message()` into that conversation came back `message.sent`,
+which is the same gate `spike/gate.py` ran for email on day 1. Nothing about the
+handler changed to make either work, which is the entire point of the SDK and
+worth saying plainly.
+
+Note `chat_type=guild`: the conversation is scoped to the server rather than to a
+person, so how many seats one Discord server can hold is still unmeasured.
+
+### 14. Newest is not best: a thinking model narrates instead of answering
+
+The rewriter asks for one line of dialogue and nothing else. `gemini-3.6-flash`
+returned its own deliberation:
+
+```
+8+1+6+1+5+1+1+3+1+6 = 53 characters.
+    Word count: 9 words vs 10 words.
+    Can we make it 10 words and 53 chars?
+```
+
+`gemini-2.5-flash`, on the same prompt, returns the line. Reasoning traces
+arriving as ordinary `content.parts` text is a real hazard for any
+constrained-output task — there is nothing in the response shape marking that
+text as thinking rather than answer. Our `guard()` rejected it on length, so
+nothing shipped broken, but only by luck of it being long.
+
+Pinned to `gemini-2.5-flash` in `.env`, with the reason written next to it.
+
+### 15. A free-tier quota that does not recover, and what it cost
+
+The key allows roughly **eight** rewrites before `RESOURCE_EXHAUSTED`, and it does
+not clear in the `retryDelay` the error advertises — that says 20s; the limit is
+sustained. Two things followed, one of them ours and worse than the quota.
+
+**Retrying was expensive and pointless.** Every failed rewrite spent ~40s in a
+retry loop against a limit that would not lift, with players waiting on it. The
+first refusal now opens a circuit for three minutes and later rewrites skip the
+call entirely.
+
+**The fallback was wrong.** A failed rewrite returned *the original line*, which
+sounds safe and is not: the impostor's turn silently did nothing and the game
+quietly became honest mode. The one mechanic worth watching would have vanished
+mid-demo with no error anywhere. Failure now degrades to the scripted backend —
+a cruder rewrite, but a rewrite.
+
+Measured: five rewrites went from 200s of stalling and zero tampering, to 20s
+once and then instant, with tampering every time.
+
+The lesson generalises past Gemini. When a feature depends on a remote model,
+"fall back to doing nothing" and "fall back to doing it worse" look equally safe
+in code review and are not remotely equivalent in front of an audience.
+
+### 16. Our own bug: an unseeded rng made a test a coin flip
+
+`Driver.rng` deals roles and is deliberately unseeded in production. The bot
+tests inherited it, so whether the one human drew the impostor — which changes
+the entire shape of the game, because a human impostor holds the round at
+`TAMPER` — varied per run. Three passes in five, and the failing case was the
+interesting one. Both shapes now have a seed and a test; the human-impostor path
+had never once executed.
