@@ -1,9 +1,10 @@
 import json
 import urllib.error
+import urllib.request
 
 import pytest
 
-from hearsay.tamper.gemini import GeminiRewriter
+from hearsay.tamper.gemini import MAX_ATTEMPTS, GeminiRewriter
 from hearsay.tamper.rewriter import build_rewriter, clean, guard, match_register
 from hearsay.tamper.scripted import ScriptedRewriter
 
@@ -159,15 +160,60 @@ class TestGeminiOffline:
         data = {"candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}]}
         assert GeminiRewriter._extract(data) is None
 
-    def test_falls_back_to_the_original_when_generation_fails(self, monkeypatch):
+    def test_degrades_to_the_scripted_backend_when_generation_fails(self, monkeypatch):
+        """Not to the original line.
+
+        Falling back to the untouched text would mean the impostor's turn
+        silently did nothing and the game quietly became honest mode — losing
+        the one thing worth watching. A cruder rewrite beats no rewrite.
+        """
         r = self._rewriter()
+        monkeypatch.setattr(r, "_generate", lambda *a, **k: None)
+        out = r.rewrite("i was asleep", "Ochre", "point at Jade")
+        assert out != "i was asleep"
+        assert "jade" in out.lower()
+
+    def test_degrades_when_the_guard_rejects(self, monkeypatch):
+        r = self._rewriter()
+        monkeypatch.setattr(r, "_generate", lambda *a, **k: "Sure! Here is the line: i saw Jade")
+        out = r.rewrite("i was asleep", "Ochre", "point at Jade")
+        assert not out.lower().startswith("sure")
+        assert out != "i was asleep"
+
+    def test_returns_the_original_when_there_is_no_fallback(self, monkeypatch):
+        r = self._rewriter()
+        r.fallback = None
         monkeypatch.setattr(r, "_generate", lambda *a, **k: None)
         assert r.rewrite("i was asleep", "Ochre", "point at Jade") == "i was asleep"
 
-    def test_falls_back_when_the_guard_rejects(self, monkeypatch):
+    def test_quota_refusal_opens_a_circuit(self, monkeypatch):
+        """The free tier stays exhausted, so asking again just costs time."""
         r = self._rewriter()
-        monkeypatch.setattr(r, "_generate", lambda *a, **k: "Sure! Here is the line: i saw Jade")
-        assert r.rewrite("i was asleep", "Ochre", "point at Jade") == "i was asleep"
+        body = json.dumps({"error": {"status": "RESOURCE_EXHAUSTED"}}).encode()
+        exc = urllib.error.HTTPError("u", 429, "quota", {}, _Body(body))
+
+        assert r._handle_http_error(exc, attempt=MAX_ATTEMPTS - 1) is None
+        assert r._cooldown_until > 0
+
+        # While the circuit is open nothing is sent at all.
+        calls = []
+        monkeypatch.setattr(urllib.request, "urlopen",
+                            lambda *a, **k: calls.append(1))
+        assert r._generate("sys", "prompt") is None
+        assert calls == []
+
+    def test_a_closed_circuit_still_calls(self, monkeypatch):
+        r = self._rewriter()
+        r._cooldown_until = 0
+        seen = []
+
+        def fake_urlopen(request, timeout=None):
+            seen.append(request.full_url)
+            raise urllib.error.URLError("offline")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        r._generate("sys", "prompt")
+        assert seen, "expected a request when the circuit is closed"
 
     def test_applies_register_to_a_good_rewrite(self, monkeypatch):
         r = self._rewriter()

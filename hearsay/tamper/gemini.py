@@ -29,8 +29,15 @@ logger = logging.getLogger(__name__)
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_MODEL = "gemini-2.5-flash"
 TIMEOUT = 30
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 2
 MAX_RETRY_WAIT = 20
+
+#: After a quota refusal, stop asking for a while. The free tier's limit is not
+#: a burst that clears in the advertised twenty seconds — it stays exhausted, so
+#: retrying every rewrite costs forty seconds each and still fails. A live game
+#: with people waiting cannot afford that, so the first refusal opens a circuit
+#: and everything goes straight to the fallback until it closes again.
+COOLDOWN_SECONDS = 180
 
 SYSTEM = """You rewrite a single line of dialogue in a social deduction game.
 
@@ -57,11 +64,25 @@ class GeminiRewriter:
 
     name = "gemini"
 
-    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self, api_key: str | None = None, model: str | None = None, fallback=None
+    ) -> None:
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is not set")
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
+
+        # Falling back to the *original line* would mean the impostor's turn
+        # silently did nothing, and the game would quietly become honest mode —
+        # which is the one thing worth watching, gone. A cruder rewrite is much
+        # better than no rewrite, so a quota failure degrades quality instead of
+        # removing the mechanic.
+        if fallback is None:
+            from hearsay.tamper.scripted import ScriptedRewriter
+
+            fallback = ScriptedRewriter()
+        self.fallback = fallback
+        self._cooldown_until = 0.0
 
     # -- the interface ----------------------------------------------------
 
@@ -81,13 +102,18 @@ class GeminiRewriter:
 
         raw = self._generate(system, prompt)
         if raw is None:
-            return original
+            return self._degrade(original, speaker, instruction, subtle)
 
         accepted = guard(original, raw)
         if accepted is None:
-            return original
+            return self._degrade(original, speaker, instruction, subtle)
 
         return match_register(original, accepted)
+
+    def _degrade(self, original: str, speaker: str, instruction: str, subtle: bool) -> str:
+        if self.fallback is None:
+            return original
+        return self.fallback.rewrite(original, speaker, instruction, subtle=subtle)
 
     # -- transport --------------------------------------------------------
 
@@ -97,6 +123,10 @@ class GeminiRewriter:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 1.0, "maxOutputTokens": 2048},
         }
+        if time.time() < self._cooldown_until:
+            logger.debug("gemini cooling down; using the fallback")
+            return None
+
         body = json.dumps(payload).encode()
 
         for attempt in range(MAX_ATTEMPTS):
@@ -144,6 +174,11 @@ class GeminiRewriter:
             wait = min(delay, MAX_RETRY_WAIT)
             logger.info("gemini quota hit; retrying in %.0fs", wait)
             return wait
+
+        if exc.code == 429:
+            self._cooldown_until = time.time() + COOLDOWN_SECONDS
+            logger.warning("gemini out of quota; falling back for %ds", COOLDOWN_SECONDS)
+            return None
 
         logger.warning("gemini %s: %s", status, error.get("message", "")[:100])
         return None
