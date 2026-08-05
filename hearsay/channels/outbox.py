@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 
+from hearsay.ai_player import AI_CHANNEL
 from hearsay.store.db import Seat, Store
 from hearsay.transport import Payload
 
@@ -63,6 +64,14 @@ class Outbox:
         self._store = store
 
     def send(self, seat: Seat, payload: Payload) -> None:
+        # The one place in the system that knows bots exist. A bot seat is an
+        # ordinary row with a synthetic conversation; there is nothing to deliver
+        # to, and the bench decides its turns from game state rather than from
+        # anything we would send here.
+        if seat.channel == AI_CHANNEL:
+            logger.debug("(%s is a bot; nothing sent)", seat.codename)
+            return
+
         # Blocks are provider-neutral and degrade to clean text on channels that
         # cannot render them, so they are always safe to pass through as-is.
         blocks = payload.blocks

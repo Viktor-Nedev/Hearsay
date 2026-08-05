@@ -26,15 +26,28 @@ import time
 
 from caspian_sdk import CommClient, CommError, Interaction, Message
 
+from hearsay.ai_player import Bench, add_noise
 from hearsay.channels.inbound import is_playable, truncate_statement
 from hearsay.channels.outbox import CapabilityMatrix, Outbox
+from hearsay.engine import narration
 from hearsay.engine.machine import apply
-from hearsay.engine.rules import MIN_SEATS
-from hearsay.engine.state import Deliver, Event, LogRelay, Said, SetDeadline, Started, Voted
+from hearsay.engine.rules import IMPOSTOR, MIN_SEATS, normalise_codename
+from hearsay.engine.state import (
+    Deliver,
+    Event,
+    LogRelay,
+    Phase,
+    Relay,
+    Said,
+    SetDeadline,
+    Started,
+    Voted,
+)
 from hearsay.lobby import Lobby
 from hearsay.router import parse
 from hearsay.store.db import Store
 from hearsay.store.snapshot import load_state, save_state
+from hearsay.tamper import build_rewriter
 from hearsay.transport import Payload
 
 logger = logging.getLogger("hearsay")
@@ -61,6 +74,8 @@ class Driver:
         self.outbox = Outbox(client, self.matrix, store)
         self.lobby = Lobby(store, self.outbox)
         self.rng = random.Random()
+        self.rewriter = None if honest else build_rewriter()
+        self.bench = Bench(self.rng, self.rewriter)
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -102,8 +117,99 @@ class Driver:
             self._advance(seat.game_id, Voted(seat.id, intent.arg or ""))
         elif intent.kind == "empty":
             pass
+        elif self._handled_as_tamper(seat, intent):
+            pass
         else:
             self._advance(seat.game_id, Said(seat.id, truncate_statement(intent.body)))
+
+        self._drain_bots(seat.game_id)
+
+    # -- the impostor's turn ----------------------------------------------
+
+    def _handled_as_tamper(self, seat, intent) -> bool:
+        """Deal with the impostor's private turn, if that is what this is."""
+        state = load_state(self.store, seat.game_id)
+        if state is None or state.phase is not Phase.TAMPER:
+            if intent.kind == "tamper":
+                self.outbox.send(seat, Payload(narration.TAMPER_NOT_NOW))
+                return True
+            return False
+
+        view = state.seat(seat.id)
+        if view is None or view.role != IMPOSTOR:
+            # Everyone else is simply waiting; saying so beats silence.
+            self.outbox.send(seat, Payload(narration.WAITING_ON_RELAY))
+            return True
+
+        body = (intent.arg if intent.kind == "tamper" else intent.body) or ""
+        if not body.strip() or body.strip().lower().startswith("skip"):
+            self.outbox.send(seat, Payload(narration.TAMPER_SKIPPED))
+            self._advance(seat.game_id, Relay(self._noise_only(state)))
+            return True
+
+        self._tamper(seat, state, body)
+        return True
+
+    def _tamper(self, seat, state, body: str) -> None:
+        """`<codename> <instruction>` — the target is a word, the rest is intent."""
+        target_word, _, instruction = body.strip().partition(" ")
+        target = state.by_codename(normalise_codename(target_word))
+        alive = ", ".join(s.codename for s in state.alive if s.id != seat.id)
+
+        if target is None:
+            self.outbox.send(seat, Payload(
+                narration.TAMPER_UNKNOWN.format(target=target_word, names=alive)))
+            return
+        if target.id == seat.id:
+            self.outbox.send(seat, Payload(narration.TAMPER_SELF))
+            return
+
+        original = state.said(target.id)
+        if original is None:
+            self.outbox.send(seat, Payload(
+                narration.TAMPER_UNKNOWN.format(target=target.codename, names=alive)))
+            return
+
+        # A network call, deliberately outside the game lock: nobody else's turn
+        # should wait on a language model.
+        changed = self.rewriter.rewrite(original, target.codename, instruction.strip())
+        if changed == original:
+            self.outbox.send(seat, Payload(narration.TAMPER_FAILED))
+            self._advance(seat.game_id, Relay(self._noise_only(state)))
+            return
+
+        self.outbox.send(seat, Payload(
+            narration.TAMPER_DONE.format(codename=target.codename)))
+        rewrites = ((target.id, changed, "impostor"),) + tuple(
+            add_noise(state, self.rewriter, self.rng, skip={target.id})
+        )
+        self._advance(seat.game_id, Relay(rewrites))
+
+    def _noise_only(self, state) -> tuple:
+        """Even an untouched round drifts sometimes, or a rewrite would be proof."""
+        if self.rewriter is None:
+            return ()
+        return tuple(add_noise(state, self.rewriter, self.rng, skip=set()))
+
+    # -- seats nobody is sitting in ---------------------------------------
+
+    def _drain_bots(self, game_id: str, limit: int = 60) -> None:
+        """Let the bots take their turns.
+
+        A queue rather than recursion: a bot's answer produces effects that reach
+        other bots, and the last one closing a phase opens the next. Bounded, so
+        a rule change that made bots answer forever would stall one game instead
+        of wedging the process.
+        """
+        for _ in range(limit):
+            state = load_state(self.store, game_id)
+            if state is None:
+                return
+            event = self.bench.next_event(state)
+            if event is None:
+                return
+            self._advance(game_id, event)
+        logger.warning("bot drain hit its limit on %s", game_id)
 
     def on_interaction(self, interaction: Interaction) -> None:
         """Button taps. Same handler for every channel that has buttons.
@@ -118,6 +224,7 @@ class Driver:
         logger.info("<- %s [button] %s", seat.codename, interaction.value)
         if action == "vote":
             self._advance(seat.game_id, Voted(seat.id, argument))
+            self._drain_bots(seat.game_id)
 
     # -- unseated callers -------------------------------------------------
 
@@ -267,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", default="hearsay.db")
     parser.add_argument("--honest", action="store_true",
                         help="no tampering; the relay passes everything through")
+    parser.add_argument("--bots", type=int, default=0, metavar="N",
+                        help="fill N seats with bots, so a game can run with one human")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -298,8 +407,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.new:
         code = driver.lobby.create_game(honest=args.honest)
-        mode = "honest" if args.honest else "tampering enabled"
+        mode = "honest" if args.honest else f"tampering via {driver.rewriter.name}"
         print(f"\n  \033[1mgame {code}\033[0m  ({mode})")
+
+        if args.bots:
+            game_id = store.game_by_code(code)["id"]
+            filled = [driver.lobby.seat_bot(game_id) for _ in range(args.bots)]
+            print(f"    bots seated:   {', '.join(filled)}")
+
         print(f"    players send:  JOIN {code}")
         print(f"    to the agent on any connected channel, then {MIN_SEATS}+ seats and START\n")
 

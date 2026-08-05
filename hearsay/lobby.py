@@ -122,6 +122,27 @@ class Lobby:
         logger.info("%s joined %s from %s", seat.codename, game["code"], channel)
         return True
 
+    def seat_bot(self, game_id: str) -> str:
+        """Fill a seat nobody is sitting in.
+
+        The row is ordinary — the engine never learns this player is not a
+        person. Only the conversation id is synthetic, because there is no
+        conversation: `channels/outbox.py` drops anything addressed here.
+        """
+        from hearsay.ai_player import AI_CHANNEL
+
+        taken = [s.codename for s in self._store.seats(game_id)]
+        codename = next_codename(taken)
+        self._store.add_seat(
+            conversation_id=f"ai:{codename.lower()}:{game_id}",
+            game_id=game_id,
+            codename=codename,
+            channel=AI_CHANNEL,
+            connection_id="bench",
+        )
+        logger.info("%s is a bot", codename)
+        return codename
+
     def leave(self, conversation_id: str) -> bool:
         seat = self._store.seat(conversation_id)
         if not seat:
