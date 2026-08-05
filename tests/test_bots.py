@@ -21,6 +21,23 @@ from hearsay.store.db import Store  # noqa: E402
 from hearsay.store.snapshot import load_state  # noqa: E402
 
 
+#: The driver deals roles from its own rng, unseeded in production. Pinning it
+#: here is the difference between a test and a coin flip: whether the one human
+#: draws the impostor changes the whole shape of the game.
+IMPOSTOR_IS_A_BOT = 5
+IMPOSTOR_IS_THE_HUMAN = 2
+
+
+def build_rig(tmp_path, seed: int):
+    client = FakeClient()
+    store = Store(tmp_path / f"t{seed}.db")
+    driver = Driver(client, store, honest=False)
+    driver.rewriter = ScriptedRewriter()
+    driver.bench = Bench(random.Random(seed), driver.rewriter)
+    driver.rng = random.Random(seed)
+    return driver, client, store
+
+
 def make_state(bots: tuple[int, ...] = (), n: int = 4, honest: bool = False) -> GameState:
     seats = tuple(
         SeatView(
@@ -143,13 +160,17 @@ class TestOneHumanGame:
 
     @pytest.fixture
     def rig(self, tmp_path):
-        client = FakeClient()
-        store = Store(tmp_path / "t.db")
-        driver = Driver(client, store, honest=False)
-        driver.rewriter = ScriptedRewriter()
-        driver.bench = Bench(random.Random(5), driver.rewriter)
+        driver, client, store = build_rig(tmp_path, IMPOSTOR_IS_A_BOT)
         yield driver, client, store
         store.close()
+
+    def _seated(self, driver, store):
+        code = driver.lobby.create_game()
+        game_id = store.game_by_code(code)["id"]
+        driver.on_message(FakeMessage("conv_human", f"JOIN {code}", channel="discord"))
+        for _ in range(3):
+            driver.lobby.seat_bot(game_id)
+        return game_id
 
     def test_a_whole_game_plays_out(self, rig):
         driver, client, store = rig
@@ -200,14 +221,39 @@ class TestOneHumanGame:
 
     def test_the_ledger_records_the_rewrites(self, rig):
         driver, client, store = rig
-        code = driver.lobby.create_game()
-        game_id = store.game_by_code(code)["id"]
-        driver.on_message(FakeMessage("conv_human", f"JOIN {code}", channel="discord"))
-        for _ in range(3):
-            driver.lobby.seat_bot(game_id)
+        game_id = self._seated(driver, store)
         driver.on_message(FakeMessage("conv_human", "START", id="m_start"))
         driver.on_message(FakeMessage("conv_human", "i was asleep", id="m_say"))
+
+        # If the human drew the impostor the round is held at TAMPER waiting on
+        # their private turn, and no relay has happened yet. Both outcomes are
+        # legitimate, so close the window explicitly rather than hoping.
+        if load_state(store, game_id).phase is Phase.TAMPER:
+            driver.on_message(FakeMessage("conv_human", "SKIP", id="m_skip"))
 
         rows = store.ledger(game_id)
         assert rows, "a completed relay should have written the ledger"
         assert {r["cause"] for r in rows} <= {"clean", "impostor", "noise"}
+
+    def test_a_human_impostor_holds_the_round(self, tmp_path):
+        """The bench must not take a person's turn for them."""
+        driver, client, store = build_rig(tmp_path, IMPOSTOR_IS_THE_HUMAN)
+        try:
+            game_id = self._seated(driver, store)
+            driver.on_message(FakeMessage("conv_human", "START", id="m_start"))
+            driver.on_message(FakeMessage("conv_human", "i was asleep", id="m_say"))
+
+            state = load_state(store, game_id)
+            assert state.impostor.id == "conv_human"
+            assert state.phase is Phase.TAMPER
+            assert store.ledger(game_id) == [], "nothing is relayed before they decide"
+
+            victim = next(s.codename for s in state.alive if s.id != "conv_human")
+            driver.on_message(FakeMessage(
+                "conv_human", f"TAMPER {victim} make them sound guilty", id="m_tamp"))
+
+            causes = {r["cause"] for r in store.ledger(game_id)}
+            assert "impostor" in causes
+            assert load_state(store, game_id).phase is Phase.DELIBERATE
+        finally:
+            store.close()
