@@ -105,10 +105,15 @@ class Deliver:
 
     Keeping fan-out explicit is what makes the leak tests possible: every
     assertion about who learned what reads straight off the effect list.
+
+    `kind` names the message so a channel that can do better than text knows
+    which ones are worth the effort — currently only `"vote"`. The engine sets
+    the label and stays ignorant of what any channel does with it.
     """
 
     seat_id: str
     payload: Payload
+    kind: str = ""
 
 
 @dataclass(frozen=True)

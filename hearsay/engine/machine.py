@@ -92,13 +92,10 @@ def _open_collection(
 ) -> tuple[GameState, list[Effect]]:
     """Ask every living player for whatever the current phase collects."""
     effects = list(effects or [])
+    voting = state.phase is Phase.VOTE
     for seat in state.alive:
-        text = (
-            narration.vote_prompt(state, seat)
-            if state.phase is Phase.VOTE
-            else narration.prompt(state)
-        )
-        effects.append(Deliver(seat.id, Payload(text)))
+        text = narration.vote_prompt(state, seat) if voting else narration.prompt(state)
+        effects.append(Deliver(seat.id, Payload(text), kind="vote" if voting else ""))
 
     seconds = PHASE_SECONDS.get(state.phase)
     if seconds:

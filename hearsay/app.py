@@ -29,6 +29,7 @@ from caspian_sdk import CommClient, CommError, Interaction, Message
 from hearsay.ai_player import Bench, add_noise
 from hearsay.channels.inbound import is_playable, truncate_statement
 from hearsay.channels.outbox import CapabilityMatrix, Outbox
+from hearsay.channels.render import enrich
 from hearsay.engine import narration
 from hearsay.engine.machine import apply
 from hearsay.engine.rules import IMPOSTOR, MIN_SEATS, normalise_codename
@@ -263,6 +264,17 @@ class Driver:
         # next player's turn.
         self._execute(effects)
 
+    def _render(self, seat, effect: Deliver) -> Payload:
+        """Give a channel with buttons something to tap, and everyone else prose."""
+        if not effect.kind:
+            return effect.payload
+        state = load_state(self.store, seat.game_id)
+        view = state.seat(seat.id) if state else None
+        if state is None or view is None:
+            return effect.payload
+        return enrich(effect.payload, effect.kind, state, view,
+                      self.outbox.supports_buttons(seat))
+
     def _execute(self, effects: list) -> None:
         for effect in effects:
             if isinstance(effect, Deliver):
@@ -270,7 +282,7 @@ class Driver:
                 if seat is None:
                     continue
                 try:
-                    self.outbox.send(seat, effect.payload)
+                    self.outbox.send(seat, self._render(seat, effect))
                     logger.info("-> %s [%s]", seat.codename, seat.channel)
                 except CommError as exc:
                     logger.error("could not reach %s: %s", seat.codename, exc.detail)
