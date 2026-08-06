@@ -1,0 +1,147 @@
+id = "ashford"
+title = "The Ashford Vigil"
+year = "1937"
+blurb = """
+Sir Edmund Ashford was found dead in his study during the annual vigil for his \
+late wife. The storm had brought down the Bramley road by nine; nobody arrived \
+after that, and nobody left. Five people were in the house.
+
+You are the investigating team. The file has been split between you — each of \
+you holds evidence the others cannot see, and no single fragment answers \
+anything. Talk to each other."""
+
+suspects = ["Marguerite Ashford", "Dr Peverell", "Thomas Vane", "Iris Coll", "Nicholas Ashford"]
+
+# ---------------------------------------------------------------- stage one
+
+[[stages]]
+id = "clock"
+title = "The hour"
+brief = """
+The study clock lay on its side by the desk, stopped. The coroner will not \
+commit to a time without help.
+
+**At what time did Sir Edmund die?** Answer to the minute."""
+question = "At what time did Sir Edmund die?"
+answers = ["10:53", "1053", "10.53", "ten fifty three", "ten fifty-three", "22:53"]
+hint = "Two of you are holding a time. Only one of you knows whether to trust it."
+# The first two are the keystone pair — see `deal()`. A time, and the reason not
+# to trust it. Adjacent, so no single investigator is ever dealt both.
+fragments = [
+  """**EXHIBIT 1a — the study clock**
+Mantel clock, brass, knocked from the desk during a struggle. The glass is \
+cracked and the mechanism has stopped. The hands read **11:04**.""",
+
+  """**EXHIBIT 1b — from the private diary of Thomas Vane, secretary**
+"Tuesday. Spoke to Sir E. again about the study clock, which has run **eleven \
+minutes fast** all week and which he refuses to have seen to. He says he likes \
+being early. I say a clock that lies is worse than no clock at all.\"""",
+
+  """**EXHIBIT 1c — statement of Iris Coll, housekeeper**
+"I took Sir Edmund his tea and he thanked me for it, same as always. I know the \
+time because the hall clock chimed the half hour as I came out — **half past \
+ten**. He was alive then. I'd swear to that anywhere.\"""",
+
+  """**EXHIBIT 1d — coroner's preliminary note**
+"Death occurred between 10pm and midnight. Body temperature and lividity \
+incline me to the earlier part of that window, though I would not swear to it \
+in court." — Dr A. Peverell, house physician.""",
+
+  """**EXHIBIT 1e — Bramley & District Electricity Board, fault log**
+Supply to Ashford House failed at **22:47** and was not restored until 06:10 the \
+following morning. Note: the hall clock at Ashford House is electric. The study \
+clock is wound by hand.""",
+]
+
+# ---------------------------------------------------------------- stage two
+
+[[stages]]
+id = "alibi"
+title = "The hour accounted for"
+brief = """
+You have your window. Four of the five in the house can account for it.
+
+**Which of them cannot?** Give a surname."""
+question = "Whose alibi does not survive the window?"
+answers = ["nicholas", "nicholas ashford", "ashford, nicholas", "the nephew"]
+hint = "One alibi depends on something that had stopped working."
+fragments = [
+  """**STATEMENT — Marguerite Ashford, sister**
+"I went to the chapel at a quarter past ten and I stayed until Iris came \
+screaming. The chapel door has to be shouldered open and it is heard across the \
+whole east wing. Ask anyone.\"""",
+
+  """**STATEMENT — Dr Peverell, physician**
+"I went down to the cellar for the claret. I was on the cellar stairs when the \
+lights went — I had to feel my way back up in the dark." Iris Coll confirms she \
+heard him on the stairs **just before the lights went**.""",
+
+  """**STATEMENT — Thomas Vane, secretary**
+"Retired at twenty past ten. Read until the power failed, then lay in the dark \
+and listened to the storm." His book was found face-down on the coverlet, \
+unfinished.""",
+
+  """**EXHIBIT 2d — Bramley exchange, operator's log**
+Trunk call placed from **Ashford House 2** to a London number. Connected \
+**22:22**. Cleared **22:58**. Duration thirty-six minutes. Caller recorded as \
+**N. Ashford**.""",
+
+  """**EXHIBIT 2e — Bramley & District, technical addendum**
+"The subscriber apparatus at Ashford House 2 is not battery-backed. It draws \
+from the house supply. **When the house supply fails, the instrument is dead.**\"""",
+]
+
+# -------------------------------------------------------------- stage three
+
+[[stages]]
+id = "motive"
+title = "The reason"
+brief = """
+You know who. A jury will want to know why.
+
+**Name the murderer.** Reply with:  ACCUSE <surname>"""
+question = "Who killed Sir Edmund Ashford?"
+answers = ["nicholas", "nicholas ashford", "ashford, nicholas", "the nephew"]
+hint = "Somebody was about to lose something, and knew the date they would lose it."
+# Keystone pair: who inherits today, and who was about to inherit instead.
+fragments = [
+  """**EXHIBIT 3a — the will, executed 1931**
+The whole of the Ashford estate, house and residue, to **Nicholas Ashford**, \
+nephew, absolutely.""",
+
+  """**EXHIBIT 3b — draft instrument, Cardew & Sons, unsigned**
+The whole of the estate to **The Ashford Trust**, for the endowment of the \
+cottage hospital, in memory of Lady Ashford. No provision for any member of the \
+family.""",
+
+  """**EXHIBIT 3c — letter from Cardew & Sons, solicitors, dated 4 days before**
+"Sir Edmund — as instructed I shall attend at the house on **the morning after \
+the vigil** with the new instrument engrossed and ready for your signature.\"""",
+
+  """**EXHIBIT 3d — demand, Hollis & Co, turf accountants**
+To **N. Ashford Esq.** The sum of **four thousand pounds**, now considerably \
+overdue. "We have been more than patient and will not be patient again." Dated \
+one week before the vigil.""",
+
+  """**STATEMENT — Iris Coll, housekeeper**
+"He said a queer thing to me that evening. He said, 'After tomorrow the house \
+will be in better hands than his.' I thought he meant he'd made it up with the \
+boy at last. I see now he didn't mean that at all.\"""",
+]
+
+# ------------------------------------------------------------------ closing
+
+[solution]
+culprit = "Nicholas Ashford"
+explanation = """
+The study clock read 11:04 and ran eleven minutes fast: **10:53**. Iris had him \
+alive at 10:30, so he died inside a twenty-three minute window.
+
+Four alibis hold. Nicholas Ashford's was a telephone call logged from 22:22 to \
+22:58 — but the house supply failed at 22:47 and the instrument at Ashford House \
+is not battery-backed. The line was dead for the last eleven minutes of a call \
+he says he was making. He left the receiver off its rest and went upstairs.
+
+He was the sole heir under the 1931 will. Cardew & Sons were coming the morning \
+after the vigil with a new one, leaving everything to the hospital trust. He owed \
+four thousand pounds to men who had stopped being patient. He had one night."""
