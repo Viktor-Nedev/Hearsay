@@ -39,23 +39,41 @@ MAX_RETRY_WAIT = 20
 #: and everything goes straight to the fallback until it closes again.
 COOLDOWN_SECONDS = 180
 
-SYSTEM = """You rewrite a single line of dialogue in a social deduction game.
+SYSTEM = """You are {speaker}, a player in a social deduction game, typing your \
+next line in an argument.
 
-The line was written by a player called {speaker}. You will be told what the \
-rewrite should make them appear to say. Produce that line as {speaker} would \
-have written it.
+You will be shown what you just wrote, and told what impression your line should \
+leave instead. Write that line — in your own words, from inside your own head.
 
 Rules, in order of importance:
-1. Output ONLY the rewritten line. No preamble, no quotes, no explanation.
-2. Keep their voice: same register, same capitalisation habits, same punctuation \
-quirks, same typos if they have them. If they write in lowercase, so do you.
-3. Keep it about the same length. Never more than twice as long.
-4. Never mention rewriting, editing, the game, or yourself.
-5. It must be sayable by a real person mid-argument. No narration."""
+1. Write as {speaker}, in the first person. You are not describing {speaker}; \
+you ARE {speaker}. Never begin with "they", "he" or "she".
+2. The impression you are given is a goal, not a sentence. Never repeat it back. \
+Say something of your own that leaves that impression.
+3. Output ONLY the line. No preamble, no quotes, no explanation.
+4. Keep your voice: same register, same capitalisation habits, same punctuation \
+quirks, same typos. If you write in lowercase, keep writing in lowercase.
+5. Keep it about the same length. Never more than twice as long.
+6. It must be sayable by a real person mid-argument. No narration.
+
+Examples.
+
+You wrote: i was nowhere near the kitchen
+Impression: they saw Vermilion go in
+Your line: i was nowhere near it but i watched vermilion walk right in
+
+You wrote: I have nothing to hide.
+Impression: they are hiding something
+Your line: I've said all I'm going to say about it.
+
+You wrote: I WASNT THERE
+Impression: they admit being there and blame Slate
+Your line: I WAS THERE BECAUSE SLATE TOLD ME TO BE"""
 
 SUBTLE_NOTE = """
-This one is a small drift, not an accusation. Shift the certainty or a detail \
-just enough that a careful reader would take a different meaning. Do not \
+
+This one is a small drift, not an accusation. Shift your certainty or one \
+detail just enough that a careful reader would take a different meaning. Do not \
 introduce new people or events."""
 
 
@@ -95,16 +113,16 @@ class GeminiRewriter:
 
         system = SYSTEM.format(speaker=speaker) + (SUBTLE_NOTE if subtle else "")
         prompt = (
-            f"{speaker} wrote:\n{original}\n\n"
-            f"Make it appear they said: {instruction or 'something subtly different'}\n\n"
-            f"The rewritten line:"
+            f"You wrote: {original}\n"
+            f"Impression: {instruction or 'the same thing, slightly less certain'}\n"
+            f"Your line:"
         )
 
         raw = self._generate(system, prompt)
         if raw is None:
             return self._degrade(original, speaker, instruction, subtle)
 
-        accepted = guard(original, raw)
+        accepted = guard(original, raw, instruction)
         if accepted is None:
             return self._degrade(original, speaker, instruction, subtle)
 
@@ -121,7 +139,10 @@ class GeminiRewriter:
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 1.0, "maxOutputTokens": 2048},
+            # Matching somebody's voice under six hard constraints is not a
+            # creativity task, and at 1.0 the same input swung between excellent
+            # and unusable run to run. Variance was the actual defect.
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
         }
         if time.time() < self._cooldown_until:
             logger.debug("gemini cooling down; using the fallback")

@@ -50,6 +50,36 @@ class TestGuard:
     def test_rejects_an_unchanged_line(self):
         assert guard("i was asleep", "I WAS ASLEEP") is None
 
+    def test_rejects_the_instruction_handed_back(self):
+        # The failure seen live: the model returns the goal instead of acting on
+        # it. Short, not meta, different from the original - it passes every
+        # other check.
+        assert guard("i was asleep the whole time", "they saw jade leaving",
+                     "they saw Jade leaving") is None
+
+    def test_echo_detection_survives_punctuation_and_case(self):
+        assert guard("i was asleep", "They saw Jade leaving!",
+                     "they saw jade leaving") is None
+
+    def test_a_real_rewrite_is_not_mistaken_for_an_echo(self):
+        out = guard("i was asleep the whole time",
+                    "i was asleep but i heard jade on the stairs",
+                    "they saw Jade leaving")
+        assert out is not None
+
+    def test_rejects_third_person_from_a_first_person_speaker(self):
+        assert guard("i was nowhere near it", "they went in twice") is None
+        assert guard("I have nothing to hide", "she was the one hiding") is None
+
+    def test_allows_third_person_when_the_speaker_used_it(self):
+        # Nothing wrong with narrating others if that is how they were talking.
+        out = guard("Ochre went in twice.", "They went in three times.")
+        assert out is not None
+
+    def test_allows_a_first_person_line_that_mentions_others(self):
+        out = guard("i was asleep", "i saw them both go past me")
+        assert out is not None
+
 
 class TestMatchRegister:
     def test_keeps_all_lowercase(self):

@@ -34,6 +34,13 @@ _WRAPPERS = [
     (re.compile(r'^\s*["“‘\'](.*)["”’\']\s*$', re.DOTALL), r"\1"),
 ]
 
+#: Someone talking about themselves.
+_FIRST_PERSON = re.compile(r"\b(i|i'm|im|i've|ive|me|my|myself)\b", re.IGNORECASE)
+
+#: A line that opens by describing somebody else — which is what an instruction
+#: sounds like, and never what a person defending themselves sounds like.
+_THIRD_PERSON_OPENING = re.compile(r"^\s*(they|he|she|it)\b", re.IGNORECASE)
+
 
 @runtime_checkable
 class Rewriter(Protocol):
@@ -54,8 +61,17 @@ def clean(candidate: str) -> str:
     return " ".join(text.split())
 
 
-def guard(original: str, candidate: str) -> str | None:
-    """Accept a rewrite, or return None to say fall back to the original."""
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def guard(original: str, candidate: str, instruction: str = "") -> str | None:
+    """Accept a rewrite, or return None to say fall back to something else.
+
+    `instruction` is optional but worth passing: the most common real failure is
+    the model handing back the instruction itself rather than acting on it, and
+    that is invisible unless you can compare the two.
+    """
     text = clean(candidate)
 
     if len(text) < MIN_CHARS:
@@ -75,7 +91,33 @@ def guard(original: str, candidate: str) -> str | None:
         logger.info("rewrite rejected: identical to the original")
         return None
 
+    if instruction and _echoes(text, instruction):
+        logger.info("rewrite rejected: handed back the instruction — %r", text[:60])
+        return None
+
+    # "i was asleep" must not become "they saw Jade leaving". A person defending
+    # themselves does not open by narrating somebody else; an instruction does.
+    if _FIRST_PERSON.search(original) and _THIRD_PERSON_OPENING.match(text):
+        logger.info("rewrite rejected: third person from a first-person speaker")
+        return None
+
     return text
+
+
+def _echoes(text: str, instruction: str) -> bool:
+    """Whether the rewrite is really just the instruction repeated.
+
+    Compared on words rather than characters so punctuation and casing — the
+    two things the model *does* adapt — cannot disguise a copy.
+    """
+    said, asked = _words(text), _words(instruction)
+    if not said or not asked:
+        return False
+    if said == asked:
+        return True
+    # A short line that is wholly contained in the instruction is a copy too.
+    overlap = len(set(said) & set(asked)) / len(set(said))
+    return overlap > 0.85
 
 
 def match_register(original: str, rewritten: str) -> str:

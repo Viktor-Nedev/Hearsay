@@ -85,7 +85,7 @@ def run(rewriter, repeat: int) -> int:
             flags = []
             if out == original:
                 flags.append("UNCHANGED")
-            if guard(original, out) is None and out != original:
+            if guard(original, out, instruction) is None and out != original:
                 flags.append("FAILS GUARD")
             if not _register_matches(original, out):
                 flags.append("REGISTER")
