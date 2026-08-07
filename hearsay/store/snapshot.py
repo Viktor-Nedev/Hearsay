@@ -21,6 +21,10 @@ def load_state(store: Store, game_id: str) -> GameState | None:
     row = store.game(game_id)
     if row is None:
         return None
+    # Another mode's game has phases this one has never heard of, and building a
+    # Phase out of them raises. Refusing politely beats crashing the handler.
+    if row["mode"] != "hearsay":
+        return None
 
     round_no = int(row["round"])
     seats = tuple(

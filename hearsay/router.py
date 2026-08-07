@@ -28,7 +28,8 @@ _SIGNATURE = re.compile(r"^--\s*$")
 # Common mobile/client sign-offs that are not part of the message.
 _SENT_FROM = re.compile(r"^\s*(sent from my .{0,40}|get outlook for .{0,20})$", re.IGNORECASE)
 
-_COMMANDS = {"join", "leave", "who", "start", "vote", "help", "tamper"}
+_COMMANDS = {"join", "leave", "who", "start", "vote", "help", "tamper",
+             "solve", "accuse"}
 
 
 @dataclass(frozen=True)

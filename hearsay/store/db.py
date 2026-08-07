@@ -48,9 +48,14 @@ def _locked(method: Callable[..., _T]) -> Callable[..., _T]:
 
 
 SCHEMA = """
+-- `round` carries the stage index in casefile mode and the round number in
+-- hearsay mode. Both are "how far in are we", so they share the column rather
+-- than one of them sitting permanently null.
 CREATE TABLE IF NOT EXISTS games (
     id          TEXT PRIMARY KEY,
     code        TEXT NOT NULL UNIQUE,
+    mode        TEXT NOT NULL DEFAULT 'hearsay',
+    case_id     TEXT,
     phase       TEXT NOT NULL,
     round       INTEGER NOT NULL DEFAULT 0,
     honest      INTEGER NOT NULL DEFAULT 0,
@@ -107,6 +112,19 @@ CREATE TABLE IF NOT EXISTS ledger (
     created_at REAL NOT NULL
 );
 
+-- Casefile: every answer anybody offered. Counts attempts so a hint can arrive
+-- at the right moment, and doubles as the record the closing reveal reads back
+-- — the same job the ledger does for rewrites.
+CREATE TABLE IF NOT EXISTS case_answers (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id    TEXT NOT NULL REFERENCES games(id),
+    stage      INTEGER NOT NULL,
+    seat_id    TEXT NOT NULL,
+    answer     TEXT NOT NULL,
+    correct    INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS cursor (
     k   TEXT PRIMARY KEY,
     seq INTEGER NOT NULL
@@ -147,7 +165,23 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
+        self._migrate()
         self._db.commit()
+
+    def _migrate(self) -> None:
+        """Add columns a database made by an older build is missing.
+
+        `CREATE TABLE IF NOT EXISTS` silently leaves an existing table alone, so
+        a running game's database would keep the old shape and fail on the first
+        query for a new column.
+        """
+        existing = {row["name"] for row in self._db.execute("PRAGMA table_info(games)")}
+        for column, ddl in (
+            ("mode", "ALTER TABLE games ADD COLUMN mode TEXT NOT NULL DEFAULT 'hearsay'"),
+            ("case_id", "ALTER TABLE games ADD COLUMN case_id TEXT"),
+        ):
+            if column not in existing:
+                self._db.execute(ddl)
 
     @_locked
     def close(self) -> None:
@@ -172,11 +206,14 @@ class Store:
     # ---- games ------------------------------------------------------------
 
     @_locked
-    def create_game(self, game_id: str, code: str, honest: bool = False) -> None:
+    def create_game(
+        self, game_id: str, code: str, honest: bool = False,
+        mode: str = "hearsay", case_id: str | None = None,
+    ) -> None:
         self._db.execute(
-            "INSERT INTO games (id, code, phase, round, honest, created_at) "
-            "VALUES (?, ?, 'LOBBY', 0, ?, ?)",
-            (game_id, code.upper(), int(honest), time.time()),
+            "INSERT INTO games (id, code, mode, case_id, phase, round, honest, created_at) "
+            "VALUES (?, ?, ?, ?, 'LOBBY', 0, ?, ?)",
+            (game_id, code.upper(), mode, case_id, int(honest), time.time()),
         )
         self._db.commit()
 
@@ -335,6 +372,37 @@ class Store:
             (game_id, round_no, seat_id, original, relayed, cause, time.time()),
         )
         self._db.commit()
+
+    # ---- casefile ---------------------------------------------------------
+
+    @_locked
+    def record_answer(
+        self, game_id: str, stage: int, seat_id: str, answer: str, correct: bool
+    ) -> None:
+        self._db.execute(
+            "INSERT INTO case_answers (game_id, stage, seat_id, answer, correct, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (game_id, stage, seat_id, answer, int(correct), time.time()),
+        )
+        self._db.commit()
+
+    @_locked
+    def attempts(self, game_id: str, stage: int) -> int:
+        """Wrong answers so far on this stage — what the hint waits for."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS n FROM case_answers "
+            "WHERE game_id = ? AND stage = ? AND correct = 0",
+            (game_id, stage),
+        ).fetchone()
+        return int(row["n"])
+
+    @_locked
+    def answers(self, game_id: str) -> list[sqlite3.Row]:
+        return list(
+            self._db.execute(
+                "SELECT * FROM case_answers WHERE game_id = ? ORDER BY stage, id", (game_id,)
+            )
+        )
 
     @_locked
     def ledger(self, game_id: str) -> list[sqlite3.Row]:

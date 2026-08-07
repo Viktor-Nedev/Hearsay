@@ -27,6 +27,10 @@ import time
 from caspian_sdk import CommClient, CommError, Interaction, Message
 
 from hearsay.ai_player import Bench, add_noise
+from hearsay.casefile.case import find_case
+from hearsay.casefile.engine import Answered, LogAnswer
+from hearsay.casefile.engine import apply as case_apply
+from hearsay.casefile.progress import load_case_state, save_case_state
 from hearsay.channels.inbound import is_playable, truncate_statement
 from hearsay.channels.outbox import CapabilityMatrix, Outbox
 from hearsay.channels.render import enrich
@@ -112,6 +116,12 @@ class Driver:
             self.lobby.who(seat.id)
         elif intent.kind == "help":
             self.outbox.send(seat, Payload(HELP))
+        elif self._is_casefile(seat.game_id):
+            # A whole second mode behind one branch. Everything above this line
+            # — joining, leaving, asking who is in — is shared; everything below
+            # belongs to Hearsay.
+            self._casefile(seat, intent)
+            return  # no bench: casefile is played by people, not filled by bots
         elif intent.kind == "start":
             self._advance(seat.game_id, Started())
         elif intent.kind == "vote":
@@ -124,6 +134,33 @@ class Driver:
             self._advance(seat.game_id, Said(seat.id, truncate_statement(intent.body)))
 
         self._drain_bots(seat.game_id)
+
+    # -- casefile ----------------------------------------------------------
+
+    def _is_casefile(self, game_id: str) -> bool:
+        row = self.store.game(game_id)
+        return bool(row) and row["mode"] == "casefile"
+
+    def _casefile(self, seat, intent) -> None:
+        """Investigators start the file, then answer it. Nothing else applies."""
+        if intent.kind == "start":
+            event = Started()
+        elif intent.kind in ("solve", "accuse"):
+            event = Answered(seat.id, intent.arg or "", accusing=intent.kind == "accuse")
+        else:
+            # Free text in a casefile game is people thinking out loud. The
+            # agent is not the place for that — Discord is — so it stays quiet
+            # rather than nagging on every message.
+            return
+
+        with self._lock(seat.game_id):
+            state = load_case_state(self.store, seat.game_id)
+            if state is None:
+                return
+            state, effects = case_apply(state, event)
+            save_case_state(self.store, state)
+
+        self._execute(effects)
 
     # -- the impostor's turn ----------------------------------------------
 
@@ -294,6 +331,11 @@ class Driver:
                     row = self.store.game(seat.game_id)
                     self.store.record_relay(seat.game_id, int(row["round"]), effect.seat_id,
                                             effect.original, effect.relayed, effect.cause)
+            elif isinstance(effect, LogAnswer):
+                seat = self.store.seat(effect.seat_id)
+                if seat:
+                    self.store.record_answer(seat.game_id, effect.stage,
+                                             effect.seat_id, effect.answer, effect.correct)
             elif isinstance(effect, SetDeadline):
                 # Timers arrive with the scheduler; the machine already emits them.
                 logger.debug("deadline %ss for %s", effect.seconds, effect.phase)
@@ -386,6 +428,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", default="hearsay.db")
     parser.add_argument("--honest", action="store_true",
                         help="no tampering; the relay passes everything through")
+    parser.add_argument("--mode", choices=("hearsay", "casefile"), default="hearsay",
+                        help="hearsay: the agent lies. casefile: the agent divides the evidence")
+    parser.add_argument("--case", default="ashford", metavar="ID",
+                        help="which case to open in casefile mode")
     parser.add_argument("--bots", type=int, default=0, metavar="N",
                         help="fill N seats with bots, so a game can run with one human")
     parser.add_argument("--verbose", action="store_true")
@@ -418,9 +464,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    relay-capable: {', '.join(driver.matrix.relay_capable())}")
 
     if args.new:
-        code = driver.lobby.create_game(honest=args.honest)
-        mode = "honest" if args.honest else f"tampering via {driver.rewriter.name}"
-        print(f"\n  \033[1mgame {code}\033[0m  ({mode})")
+        if args.mode == "casefile":
+            case = find_case(args.case)
+            code = driver.lobby.create_game(mode="casefile", case_id=case.id)
+            print(f"\n  \033[1mcase {code}\033[0m  ({case.title}, "
+                  f"{len(case.stages)} stages)")
+        else:
+            code = driver.lobby.create_game(honest=args.honest)
+            label = "honest" if args.honest else f"tampering via {driver.rewriter.name}"
+            print(f"\n  \033[1mgame {code}\033[0m  ({label})")
 
         if args.bots:
             game_id = store.game_by_code(code)["id"]

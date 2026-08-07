@@ -54,13 +54,22 @@ class Lobby:
 
     # -- host ------------------------------------------------------------
 
-    def create_game(self, honest: bool = False) -> str:
-        """Open a new lobby and return the code players will send."""
+    def create_game(
+        self, honest: bool = False, mode: str = "hearsay", case_id: str | None = None
+    ) -> str:
+        """Open a new lobby and return the code players will send.
+
+        The code *is* the private room. Sharing it with three friends and nobody
+        else is the whole of "invite only" — there is no server feature behind
+        it and none is needed.
+        """
         code = new_game_code()
         while self._store.game_by_code(code):
             code = new_game_code()
-        self._store.create_game(f"game_{uuid.uuid4().hex[:12]}", code, honest=honest)
-        logger.info("opened game %s", code)
+        self._store.create_game(
+            f"game_{uuid.uuid4().hex[:12]}", code, honest=honest, mode=mode, case_id=case_id
+        )
+        logger.info("opened %s game %s", mode, code)
         return code
 
     # -- players ---------------------------------------------------------
