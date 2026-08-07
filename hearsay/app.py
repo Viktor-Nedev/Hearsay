@@ -50,7 +50,8 @@ from hearsay.engine.state import (
 )
 from hearsay.lobby import Lobby
 from hearsay.router import parse
-from hearsay.store.db import Store
+from hearsay import server_content
+from hearsay.store.db import Seat, Store
 from hearsay.store.snapshot import load_state, save_state
 from hearsay.tamper import build_rewriter
 from hearsay.transport import Payload
@@ -99,6 +100,13 @@ class Driver:
             (message.text or "")[:80],
         )
 
+        # Furnishing the server happens before anybody has a seat, and in
+        # channels that exist only to be read. It is deliberately outside the
+        # game entirely.
+        if intent.kind == "setup":
+            self._setup(message, intent)
+            return
+
         if seat is None:
             self._greet(message, intent)
             return
@@ -134,6 +142,30 @@ class Driver:
             self._advance(seat.game_id, Said(seat.id, truncate_statement(intent.body)))
 
         self._drain_bots(seat.game_id)
+
+    # -- furnishing the server ---------------------------------------------
+
+    def _setup(self, message: Message, intent) -> None:
+        """Publish a section into the channel the request came from.
+
+        The agent can only speak into a conversation it already knows, and a
+        Discord channel becomes a conversation the moment somebody posts in it.
+        So the ritual is the requirement: post `SETUP rules` in #rules and the
+        rules appear there.
+        """
+        body = server_content.section(intent.arg or "")
+        placeholder = Seat(
+            conversation_id=message.conversation_id, game_id="", codename="setup",
+            role=None, alive=True, channel=message.channel,
+            connection_id=message.connection_id, last_message_id=message.id,
+        )
+        if body is None:
+            self.outbox.send(placeholder, Payload(server_content.UNKNOWN_SECTION.format(
+                name=intent.arg or "(nothing)", available=server_content.available())))
+            return
+
+        logger.info("publishing %r into %s", intent.arg, message.conversation_id)
+        self.outbox.send(placeholder, Payload(body))
 
     # -- casefile ----------------------------------------------------------
 

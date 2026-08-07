@@ -29,7 +29,7 @@ _SIGNATURE = re.compile(r"^--\s*$")
 _SENT_FROM = re.compile(r"^\s*(sent from my .{0,40}|get outlook for .{0,20})$", re.IGNORECASE)
 
 _COMMANDS = {"join", "leave", "who", "start", "vote", "help", "tamper",
-             "solve", "accuse"}
+             "solve", "accuse", "setup"}
 
 
 @dataclass(frozen=True)
